@@ -1,5 +1,10 @@
-use ad_editor::{buffer::Buffer, ts::Parser};
-use std::{error::Error, fs};
+use ad_editor::{
+    buffer::Buffer,
+    dot::Dot,
+    term::{Color, Style},
+    ts::Parser,
+};
+use std::{collections::HashMap, error::Error, fs};
 
 const QUERY: &str = "\
 (line_comment) @comment
@@ -21,75 +26,35 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut tkz = parser.new_tokenizer(QUERY).unwrap();
     tkz.update(0, usize::MAX, root, &b);
 
-    // hacked up versions of the in-crate code for this demo
+    // hacked up versions of the in-crate code for this example
+    let bg: Color = "#1B1720".try_into().unwrap();
     let fg: Color = "#E6D29E".try_into().unwrap();
     let comment: Color = "#624354".try_into().unwrap();
     let string: Color = "#61DCA5".try_into().unwrap();
+    let dot_bg: Color = "#336677".try_into().unwrap();
+    let load_bg: Color = "#957FB8".try_into().unwrap();
+    let exec_bg: Color = "#Bf616A".try_into().unwrap();
 
-    let mut i = 0;
+    let cs: HashMap<String, Vec<Style>> = [
+        ("default".to_string(), vec![Style::Bg(bg), Style::Fg(fg)]),
+        (
+            "comment".to_string(),
+            vec![Style::Italic, Style::Fg(comment)],
+        ),
+        ("string".to_string(), vec![Style::Fg(string)]),
+        ("dot".to_string(), vec![Style::Fg(fg), Style::Bg(dot_bg)]),
+        ("load".to_string(), vec![Style::Fg(fg), Style::Bg(load_bg)]),
+        ("exec".to_string(), vec![Style::Fg(fg), Style::Bg(exec_bg)]),
+        ("end".to_string(), vec![Style::Bg(bg), Style::Fg(fg)]),
+    ]
+    .into_iter()
+    .collect();
 
-    while let Some(slice) = b.line(i) {
-        let mut buf = String::new();
-        let mut idx = 0;
+    let exec_rng = Some((false, Dot::from_char_indices(56, 73).as_range()));
 
-        for (tag, ch_idx) in tkz.tokenize_line(i, slice.len_utf8()).into_iter() {
-            if ch_idx > 0 {
-                buf.extend(slice.chars().skip(idx).take(ch_idx - idx));
-            }
-            match tag {
-                "default" => buf.push_str(&Style::Fg(fg).to_string()),
-                "comment" => buf.push_str(&Style::Fg(comment).to_string()),
-                "string" => buf.push_str(&Style::Fg(string).to_string()),
-                "end" => buf.push_str(&Style::Reset.to_string()),
-                _ => panic!("unknown tag: {tag}"),
-            }
-            idx = ch_idx;
-        }
-
-        print!("{buf}");
-        i += 1;
+    for y in 0..b.len_lines() {
+        print!("{}", tkz.styled_line(&b, y, exec_rng, &cs));
     }
 
     Ok(())
-}
-
-// From the term module
-
-use std::fmt;
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct Color {
-    r: u8,
-    b: u8,
-    g: u8,
-}
-
-impl TryFrom<&str> for Color {
-    type Error = String;
-
-    fn try_from(s: &str) -> Result<Self, String> {
-        let [_, r, g, b] = match u32::from_str_radix(s.strip_prefix('#').unwrap_or(s), 16) {
-            Ok(hex) => hex.to_be_bytes(),
-            Err(e) => return Err(format!("invalid color ('{s}'): {e}")),
-        };
-
-        Ok(Self { r, g, b })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Style {
-    Fg(Color),
-    Reset,
-}
-
-impl fmt::Display for Style {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use Style::*;
-
-        match self {
-            Fg(Color { r, b, g }) => write!(f, "\x1b[38;2;{r};{g};{b}m"),
-            Reset => write!(f, "\x1b[m"),
-        }
-    }
 }

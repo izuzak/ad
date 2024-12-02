@@ -57,7 +57,7 @@ pub unsafe fn register_signal_handler() {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Color {
+pub struct Color {
     r: u8,
     b: u8,
     g: u8,
@@ -76,9 +76,8 @@ impl TryFrom<&str> for Color {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Style {
+pub enum Style {
     Fg(Color),
     Bg(Color),
     Bold,
