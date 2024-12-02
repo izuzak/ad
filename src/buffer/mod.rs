@@ -25,7 +25,7 @@ mod edit;
 mod internal;
 
 use edit::{Edit, EditLog, Kind, Txt};
-pub use internal::{Chars, GapBuffer, IdxChars, Slice};
+pub use internal::{Chars, GapBuffer, IdxChars, Slice, SliceIter};
 
 pub(crate) use buffers::{BufferId, Buffers};
 
@@ -277,13 +277,13 @@ impl Buffer {
     }
 
     /// Create a new unnamed buffer with the given content
-    pub fn new_unnamed(id: usize, content: &str) -> Self {
+    pub fn new_unnamed(id: usize, content: impl Into<String>) -> Self {
         Self {
             id,
             kind: BufferKind::Unnamed,
             dot: Dot::default(),
             xdot: Dot::default(),
-            txt: GapBuffer::from(normalize_line_endings(content.to_string())),
+            txt: GapBuffer::from(normalize_line_endings(content.into())),
             cached_rx: 0,
             last_save: SystemTime::now(),
             dirty: false,

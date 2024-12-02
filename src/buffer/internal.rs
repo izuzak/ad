@@ -791,6 +791,13 @@ impl<'a> Slice<'a> {
         }
     }
 
+    /// The number of utf-8 characters within this slice.
+    ///
+    /// Calculating involves parsing the entire slice as utf-8.
+    pub fn len_utf8(&self) -> usize {
+        self.chars().count()
+    }
+
     /// The two sides of this slice as &str references
     pub fn as_strs(&self) -> (&str, &str) {
         // SAFETY: we know that we have valid utf8 data internally
@@ -799,6 +806,14 @@ impl<'a> Slice<'a> {
                 std::str::from_utf8_unchecked(self.left),
                 std::str::from_utf8_unchecked(self.right),
             )
+        }
+    }
+
+    /// Iterate over the contiguous &[u8] regions within this slice
+    pub fn slice_iter(self) -> SliceIter<'a> {
+        SliceIter {
+            inner: self,
+            pos: Some(false),
         }
     }
 
@@ -862,6 +877,30 @@ impl PartialEq<String> for Slice<'_> {
     }
 }
 
+#[derive(Debug)]
+pub struct SliceIter<'a> {
+    inner: Slice<'a>,
+    pos: Option<bool>,
+}
+
+impl<'a> Iterator for SliceIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.pos? {
+            false => {
+                self.pos = Some(true);
+                Some(self.inner.left)
+            }
+
+            true => {
+                self.pos = None;
+                Some(self.inner.right)
+            }
+        }
+    }
+}
+
 /// An iterator of characters from a [Slice]
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Chars<'a> {
@@ -882,6 +921,7 @@ impl Iterator for Chars<'_> {
         let ch = unsafe { decode_char_at(cur, data) };
         let len = ch.len_utf8();
         self.cur += len;
+
         Some(ch)
     }
 }
