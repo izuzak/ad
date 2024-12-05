@@ -10,16 +10,18 @@ use crate::{
 use libloading::{Library, Symbol};
 use std::collections::HashMap;
 use std::{
+    cmp::{max, Ord, Ordering, PartialOrd},
     fmt,
-    ops::{ControlFlow, Deref, DerefMut},
+    iter::Peekable,
+    ops::{Deref, DerefMut},
     path::Path,
+    slice,
 };
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{self as ts, ffi::TSLanguage};
 // use unicode_width::UnicodeWidthChar;
 
 const TK_DEFAULT: &str = "default";
-const TK_END: &str = "end";
 const TK_DOT: &str = "dot";
 const TK_LOAD: &str = "load";
 const TK_EXEC: &str = "exec";
@@ -144,50 +146,32 @@ impl Tokenizer {
         while let Some((m, _)) = it.next() {
             for cap_idx in 0..self.q.capture_names().len() {
                 for node in m.nodes_for_capture_index(cap_idx as u32) {
-                    let ts::Range {
-                        start_point,
-                        end_point,
-                        ..
-                    } = node.range();
-
                     self.ranges.push(SyntaxRange {
-                        start: start_point,
-                        end: end_point,
-                        cap_idx,
+                        r: node.range().into(),
+                        cap_idx: Some(cap_idx),
                     });
                 }
             }
         }
     }
 
-    pub fn tokenize_line(&self, line: usize, len: usize) -> Tokens<'_> {
-        let names = self.q.capture_names();
-        let start = ts::Point::new(line, 0);
-        let end = ts::Point::new(line, len);
+    pub fn iter_tokenized_lines_from(&self, line: usize, b: &Buffer) -> LineIter<'_> {
+        let line_endings = b.txt.byte_line_endings();
+        let start_byte = if line == 0 {
+            0
+        } else {
+            line_endings[line - 1] + 1
+        };
 
-        let mut tokens = Vec::new();
-        let mut i = 0;
-
-        for r in self.ranges.iter() {
-            if r.push_tokens(line, start, end, &mut i, &mut tokens, names)
-                .is_break()
-            {
-                break;
-            }
+        LineIter {
+            names: self.q.capture_names(),
+            line_endings,
+            ranges: &self.ranges,
+            start_byte,
+            line,
+            dot_range: ByteRange { from: 0, to: 12 },
+            load_exec_range: None,
         }
-
-        if tokens.is_empty() {
-            tokens.push(Token {
-                ty: TK_DEFAULT,
-                i: 0,
-            });
-        } else if i > 0 && i < len {
-            tokens.push(Token { ty: TK_DEFAULT, i });
-        }
-
-        tokens.push(Token { ty: TK_END, i: len });
-
-        Tokens::Multi(tokens)
     }
 
     // Tokenizing and rendering a line:
@@ -196,83 +180,86 @@ impl Tokenizer {
     //   - max_cols (screen_cols - lpad)
     //   - start and end character offsets within the line
     //   - required padding
-    pub fn styled_line(
-        &self,
-        b: &Buffer,
-        // col_off: usize,
-        // tabstop: usize,
-        y: usize,
-        // lpad: usize,
-        // screen_cols: usize,
-        load_exec_range: Option<(bool, Range)>,
-        cs: &ColorScheme,
-    ) -> String {
-        let slice = b.txt.line(y);
-        let len = slice.len_utf8();
-        // let max_cols = screen_cols - lpad;
+    // pub fn styled_line(
+    //     &self,
+    //     b: &Buffer,
+    //     // col_off: usize,
+    //     // tabstop: usize,
+    //     y: usize,
+    //     // lpad: usize,
+    //     // screen_cols: usize,
+    //     load_exec_range: Option<(bool, Range)>,
+    //     cs: &ColorScheme,
+    // ) -> String {
+    //     let slice = b.txt.line(y);
+    //     let byte_from = slice.from_byte();
+    //     let len = b.txt.line_len_chars(y);
+    //     let byte_to = byte_from + len;
+    //     // let max_cols = screen_cols - lpad;
 
-        // FIXME: handle col_off
-        // let (start, end, truncated) = start_end_chars(slice, tabstop, col_off, max_cols);
-        let tokens = self.tokenize_line(y, len);
+    //     // FIXME: handle col_off
+    //     // let (start, end, truncated) = start_end_chars(slice, tabstop, col_off, max_cols);
+    //     let tokens = self.tokenize_line(byte_from, byte_to);
 
-        let dot_range = b.dot.line_range(y, b).map(|lr| map_line_range(lr, len));
-        let mut tokens = match dot_range {
-            Some((start, end)) => {
-                Tokens::Multi(tokens.with_highlighted_dot(start, end, len, TK_DOT))
-            }
-            None => tokens,
-        };
+    //     let dot_range = b.dot.line_range(y, b).map(|lr| map_line_range(lr, len));
+    //     let mut tokens = match dot_range {
+    //         Some((start, end)) => {
+    //             Tokens::Multi(tokens.with_highlighted_dot(start, end, len, TK_DOT))
+    //         }
+    //         None => tokens,
+    //     };
 
-        match load_exec_range {
-            Some((is_load, rng)) if !b.dot.contains_range(&rng) => {
-                if let Some((start, end)) = rng.line_range(y, b).map(|lr| map_line_range(lr, len)) {
-                    let ty = if is_load { TK_LOAD } else { TK_EXEC };
-                    tokens = Tokens::Multi(tokens.with_highlighted_dot(start, end, len, ty));
-                }
-            }
+    //     match load_exec_range {
+    //         Some((is_load, rng)) if !b.dot.contains_range(&rng) => {
+    //             if let Some((start, end)) = rng.line_range(y, b).map(|lr| map_line_range(lr, len)) {
+    //                 let ty = if is_load { TK_LOAD } else { TK_EXEC };
+    //                 tokens = Tokens::Multi(tokens.with_highlighted_dot(start, end, len, ty));
+    //             }
+    //         }
 
-            _ => (),
-        }
+    //         _ => (),
+    //     }
 
-        let tks = match tokens {
-            Tokens::Single(tk) => vec![tk],
-            Tokens::Multi(tks) => tks,
-        };
+    //     let tks = match tokens {
+    //         Tokens::Single(tk) => vec![tk],
+    //         Tokens::Multi(tks) => tks,
+    //     };
 
-        let mut buf = String::with_capacity(len);
-        let mut post: Option<Vec<Style>> = None;
-        let mut idx = 0;
+    //     let mut buf = String::with_capacity(len);
+    //     let mut post: Option<Vec<Style>> = None;
+    //     let mut idx = 0;
 
-        for tk in tks.into_iter() {
-            if tk.i > 0 {
-                buf.extend(slice.chars().skip(idx).take(tk.i - idx));
-            }
+    //     for tk in tks.into_iter() {
+    //         if tk.i > 0 {
+    //             buf.extend(slice.chars().skip(idx).take(tk.i - idx));
+    //         }
 
-            if let Some(styles) = post {
-                for s in styles {
-                    buf.push_str(&s.to_string());
-                }
-            }
+    //         if let Some(styles) = post {
+    //             for s in styles {
+    //                 buf.push_str(&s.to_string());
+    //             }
+    //         }
 
-            post = tk.push_styles(cs, &mut buf);
-            idx = tk.i;
-        }
+    //         post = tk.push_styles(cs, &mut buf);
+    //         idx = tk.i;
+    //     }
 
-        buf
-    }
+    //     buf
+    // }
 }
 
-#[inline]
-fn map_line_range(lr: LineRange, len: usize) -> (usize, usize) {
-    match lr {
-        // LineRange is an inclusive range so we need to insert after `end` if its
-        // not the end of the line
-        LineRange::Partial { start, end, .. } => (start, end + 1),
-        LineRange::FromStart { end, .. } => (0, end + 1),
-        LineRange::ToEnd { start, .. } => (start, len),
-        LineRange::Full { .. } => (0, len),
-    }
-}
+// // FIXME: need to convert char indices into byte indices here
+// #[inline]
+// fn map_line_range(lr: LineRange, len: usize, b: &Buffer) -> (usize, usize) {
+//     match lr {
+//         // LineRange is an inclusive range so we need to insert after `end` if its
+//         // not the end of the line
+//         LineRange::Partial { start, end, .. } => (start, end + 1),
+//         LineRange::FromStart { end, .. } => (0, end + 1),
+//         LineRange::ToEnd { start, .. } => (start, len),
+//         LineRange::Full { .. } => (0, len),
+//     }
+// }
 
 // #[inline]
 // fn start_end_chars(
@@ -333,85 +320,58 @@ fn map_line_range(lr: LineRange, len: usize) -> (usize, usize) {
 //     (start, end, truncated)
 // }
 
+/// Byte offsets within a Buffer
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct SyntaxRange {
-    start: ts::Point,
-    end: ts::Point,
-    cap_idx: usize,
+pub(crate) struct ByteRange {
+    from: usize,
+    to: usize,
 }
 
-impl SyntaxRange {
-    fn push_tokens<'a>(
-        &self,
-        line: usize,
-        start: ts::Point,
-        end: ts::Point,
-        idx: &mut usize,
-        tokens: &mut Vec<Token<'a>>,
-        names: &[&'a str],
-    ) -> ControlFlow<(), ()> {
-        if self.end.row < line {
-            return ControlFlow::Continue(());
-        } else if self.start.row > line {
-            return ControlFlow::Break(());
-        } else if self.start <= start && self.end >= end {
-            // full line
-            tokens.push(Token {
-                ty: names[self.cap_idx],
-                i: 0,
-            });
-            return ControlFlow::Break(());
-        } else if self.start.row == line && self.end >= end {
-            // from within line until the end
-            tokens.push(Token {
-                ty: TK_DEFAULT,
-                i: *idx,
-            });
-            tokens.push(Token {
-                ty: names[self.cap_idx],
-                i: self.start.column,
-            });
-            return ControlFlow::Break(());
-        }
+impl ByteRange {
+    #[inline]
+    fn intersects(&self, start_byte: usize, end_byte: usize) -> bool {
+        self.from <= end_byte && start_byte <= self.to
+    }
 
-        if self.start.row < line {
-            tokens.push(Token {
-                ty: names[self.cap_idx],
-                i: 0,
-            });
-        } else {
-            tokens.push(Token {
-                ty: TK_DEFAULT,
-                i: *idx,
-            });
-            tokens.push(Token {
-                ty: names[self.cap_idx],
-                i: self.start.column,
-            });
-        }
-
-        *idx = self.end.column;
-
-        ControlFlow::Continue(())
+    #[inline]
+    fn contains(&self, start_byte: usize, end_byte: usize) -> bool {
+        self.from <= start_byte && self.to >= end_byte
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Token<'a> {
-    pub ty: &'a str,
-    pub i: usize,
+impl From<ts::Range> for ByteRange {
+    fn from(r: ts::Range) -> Self {
+        Self {
+            from: r.start_byte,
+            to: r.end_byte,
+        }
+    }
 }
 
-impl<'a> Token<'a> {
-    // If there is any resets that need to take place at the end of this token they are returned
-    #[must_use]
-    pub(crate) fn push_styles(&self, cs: &ColorScheme, buf: &mut String) -> Option<Vec<Style>> {
+/// A tagged [ByteRange] denoting which tree-sitter capture index from our scheme query
+/// matched this range within the buffer. A cap_idx of [None] indicates that this is a
+/// default range for the purposes of syntax highlighting
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SyntaxRange {
+    cap_idx: Option<usize>,
+    r: ByteRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RangeToken<'a> {
+    pub(crate) ty: &'a str,
+    pub(crate) r: ByteRange,
+}
+
+impl RangeToken<'_> {
+    pub fn render(&self, buf: &mut String, b: &Buffer, cs: &ColorScheme) {
+        let slice = b.txt.slice_from_byte_offsets(self.r.from, self.r.to);
         let styles = cs
             .get(self.ty)
             .or(cs.get(TK_DEFAULT))
             .expect("to have default styles");
 
-        let mut post = Vec::new();
+        let mut post = Vec::with_capacity(styles.len());
 
         for s in styles {
             buf.push_str(&s.to_string());
@@ -424,69 +384,248 @@ impl<'a> Token<'a> {
             }
         }
 
-        if post.is_empty() {
-            None
-        } else {
-            Some(post)
+        let (l, r) = slice.as_strs();
+        buf.push_str(l);
+        buf.push_str(r);
+
+        for s in post.into_iter() {
+            buf.push_str(&s.to_string());
         }
     }
+}
 
-    fn with_highlighted_dot(
-        self,
-        start: usize,
-        end: usize,
-        tk_end: usize,
-        ty: &'a str,
-    ) -> Vec<Token<'a>> {
-        let mut tks = Vec::with_capacity(3);
-        if start > self.i {
-            tks.push(self);
+impl PartialOrd for SyntaxRange {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SyntaxRange {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.r.cmp(&other.r)
+    }
+}
+
+/// Yield sub-iterators of tokens per-line in a file.
+///
+/// Any given [SyntaxRange] coming from the underlying [Tokenizer] may be
+/// used by multiple [TokenIter]s coming from this iterator if the range
+/// in question spans multiple lines
+#[derive(Debug)]
+pub struct LineIter<'a> {
+    /// capture names to be used as the token types
+    names: &'a [&'a str],
+    /// byte offsets for the position of each newline in the input
+    line_endings: Vec<usize>,
+    /// full set of syntax ranges for the input
+    ranges: &'a [SyntaxRange],
+    start_byte: usize,
+    /// the next line to yeild
+    line: usize,
+    dot_range: ByteRange,
+    load_exec_range: Option<(bool, ByteRange)>,
+}
+
+impl<'a> Iterator for LineIter<'a> {
+    type Item = TokenIter<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.line == self.line_endings.len() {
+            return None;
         }
-        tks.push(Token { ty, i: start });
-        if end < tk_end {
-            tks.push(Token {
-                ty: self.ty,
-                i: end,
+
+        let start_byte = self.start_byte;
+        let end_byte = self.line_endings[self.line];
+
+        let dot_range = if self.dot_range.intersects(start_byte, end_byte) {
+            Some(self.dot_range)
+        } else {
+            None
+        };
+        let load_exec_range = self.load_exec_range.and_then(|(is_load, r)| {
+            if r.intersects(start_byte, end_byte) {
+                Some((is_load, r))
+            } else {
+                None
+            }
+        });
+
+        // Determine tokens required for the next line
+        let held: Option<RangeToken<'_>>;
+        let ranges: Peekable<slice::Iter<'_, SyntaxRange>>;
+
+        loop {
+            match self.ranges.first() {
+                // Advance to the next range
+                Some(sr) if sr.r.to < start_byte => {
+                    self.ranges = &self.ranges[1..];
+                }
+
+                // End of known tokens so everything else is just TK_DEFAULT
+                None => {
+                    held = Some(RangeToken {
+                        ty: TK_DEFAULT,
+                        r: ByteRange {
+                            from: start_byte,
+                            to: end_byte,
+                        },
+                    });
+                    ranges = [].iter().peekable();
+                    break;
+                }
+
+                // The next range is beyond this line
+                Some(sr) if sr.r.from >= end_byte => {
+                    held = Some(RangeToken {
+                        ty: TK_DEFAULT,
+                        r: ByteRange {
+                            from: start_byte,
+                            to: end_byte,
+                        },
+                    });
+                    ranges = [].iter().peekable();
+                    break;
+                }
+
+                // The next range fully contains the line
+                Some(sr) if sr.r.contains(start_byte, end_byte) => {
+                    held = Some(RangeToken {
+                        ty: sr.cap_idx.map(|i| self.names[i]).unwrap_or(TK_DEFAULT),
+                        r: ByteRange {
+                            from: start_byte,
+                            to: end_byte,
+                        },
+                    });
+                    ranges = [].iter().peekable();
+                    break;
+                }
+
+                // The next range starts at the beginning of the line or ends within the line
+                Some(sr) => {
+                    assert!(sr.r.from < end_byte);
+                    if sr.r.from > start_byte {
+                        held = Some(RangeToken {
+                            ty: TK_DEFAULT,
+                            r: ByteRange {
+                                from: start_byte,
+                                to: sr.r.from,
+                            },
+                        });
+                    } else {
+                        held = None;
+                    }
+                    ranges = self.ranges.iter().peekable();
+                    break;
+                }
+            }
+        }
+
+        self.line += 1;
+        self.start_byte = end_byte + 1;
+
+        Some(TokenIter {
+            start_byte,
+            end_byte,
+            names: self.names,
+            ranges,
+            held,
+            dot_range,
+            load_exec_range,
+        })
+    }
+}
+
+/// An iterator of tokens for a single line.
+///
+/// "normal" ranges will be injected in-between the known syntax regions
+/// so a consumer may treat the output of this iterator as a continous,
+/// non-overlapping set of sub-regions spanning a single line within a
+/// given buffer.
+#[derive(Debug)]
+pub struct TokenIter<'a> {
+    /// byte offset for the start of this line
+    start_byte: usize,
+    /// byte offset for the end of this line
+    end_byte: usize,
+    /// Capture names to be used as the token types
+    names: &'a [&'a str],
+    /// The set of ranges applicable to this line
+    ranges: Peekable<slice::Iter<'a, SyntaxRange>>,
+    /// When yielding a dot range we may end up partially consuming
+    /// the following range so we need to stash a Token for yielding
+    /// on the next call to .next()
+    held: Option<RangeToken<'a>>,
+    dot_range: Option<ByteRange>,
+    load_exec_range: Option<(bool, ByteRange)>,
+}
+
+impl<'a> Iterator for TokenIter<'a> {
+    type Item = RangeToken<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let held = self.held.take();
+        if held.is_some() {
+            return held;
+        }
+
+        let next = self.ranges.next()?;
+
+        if next.r.from > self.end_byte {
+            return None;
+        } else if next.r.to >= self.end_byte {
+            self.ranges = [].iter().peekable();
+
+            return Some(RangeToken {
+                ty: next.cap_idx.map(|i| self.names[i]).unwrap_or(TK_DEFAULT),
+                r: ByteRange {
+                    from: max(next.r.from, self.start_byte),
+                    to: self.end_byte,
+                },
             });
         }
 
-        tks
-    }
-}
+        match self.ranges.peek() {
+            Some(sr) if sr.r.from > self.end_byte => {
+                self.ranges = [].iter().peekable();
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Tokens<'a> {
-    Single(Token<'a>),
-    Multi(Vec<Token<'a>>),
-}
-
-impl<'a> Tokens<'a> {
-    pub fn with_highlighted_dot(
-        self,
-        start: usize,
-        end: usize,
-        len: usize,
-        ty: &'a str,
-    ) -> Vec<Token<'a>> {
-        match self {
-            Self::Single(tk) => tk.with_highlighted_dot(start, end, len, ty),
-
-            Self::Multi(tks) => {
-                let mut new_tks = Vec::new();
-                let mut it = tks.into_iter().peekable();
-
-                while let Some(tk) = it.next() {
-                    let tk_end = it.peek().map(|t| t.i).unwrap_or(len);
-
-                    if start >= tk_end || end <= tk.i {
-                        new_tks.push(tk);
-                    } else {
-                        new_tks.extend_from_slice(&tk.with_highlighted_dot(start, end, tk_end, ty));
-                    }
-                }
-
-                new_tks
+                self.held = Some(RangeToken {
+                    ty: TK_DEFAULT,
+                    r: ByteRange {
+                        from: next.r.to,
+                        to: self.end_byte,
+                    },
+                });
             }
+
+            Some(sr) if sr.r.from > next.r.to => {
+                self.held = Some(RangeToken {
+                    ty: TK_DEFAULT,
+                    r: ByteRange {
+                        from: next.r.to,
+                        to: sr.r.from,
+                    },
+                });
+            }
+
+            None if next.r.to < self.end_byte => {
+                self.held = Some(RangeToken {
+                    ty: TK_DEFAULT,
+                    r: ByteRange {
+                        from: next.r.to,
+                        to: self.end_byte,
+                    },
+                });
+            }
+
+            _ => (),
         }
+
+        Some(RangeToken {
+            ty: next.cap_idx.map(|i| self.names[i]).unwrap_or(TK_DEFAULT),
+            r: ByteRange {
+                from: max(next.r.from, self.start_byte),
+                to: next.r.to,
+            },
+        })
     }
 }

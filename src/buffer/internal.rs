@@ -255,6 +255,13 @@ impl GapBuffer {
         self.n_chars
     }
 
+    pub fn byte_line_endings(&self) -> Vec<usize> {
+        self.line_endings
+            .keys()
+            .map(|i| self.raw_byte_to_byte(*i))
+            .collect()
+    }
+
     /// Clear the contents of the buffer.
     ///
     /// # Note
@@ -354,6 +361,14 @@ impl GapBuffer {
         };
 
         chars_to - chars_from
+    }
+
+    /// An exclusive range of characters from the buffer
+    pub fn slice_from_byte_offsets(&self, byte_from: usize, byte_to: usize) -> Slice<'_> {
+        let from = self.byte_to_raw_byte(byte_from);
+        let to = self.byte_to_raw_byte(byte_to);
+
+        Slice::from_raw_offsets(from, to, self)
     }
 
     /// An exclusive range of characters from the buffer
@@ -699,6 +714,15 @@ impl GapBuffer {
     }
 
     #[inline]
+    fn byte_to_raw_byte(&self, byte: usize) -> usize {
+        if byte > self.gap_start {
+            byte + self.gap()
+        } else {
+            byte
+        }
+    }
+
+    #[inline]
     fn offset_char_to_byte(
         &self,
         char_idx: usize,
@@ -789,6 +813,11 @@ impl<'a> Slice<'a> {
             left: &gb.data[from..gb.gap_start],
             right: &gb.data[gb.gap_end..to],
         }
+    }
+
+    /// The byte offset that this slice starts at within the parent [GapBuffer].
+    pub fn from_byte(&self) -> usize {
+        self.from
     }
 
     /// The number of utf-8 characters within this slice.

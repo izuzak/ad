@@ -52,8 +52,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let exec_rng = Some((false, Dot::from_char_indices(56, 73).as_range()));
 
-    for y in 0..b.len_lines() {
-        print!("{}", tkz.styled_line(&b, y, exec_rng, &cs));
+    for (i, it) in tkz.iter_tokenized_lines_from(0, &b).enumerate() {
+        let mut buf = String::new();
+        buf.push_str(&format!("{}{i:<2}| ", Style::Fg(exec_bg)));
+        for tk in it {
+            tk.render(&mut buf, &b, &cs);
+            buf.push_str(&format!("{}|", Style::Fg(exec_bg)));
+        }
+        println!("{buf}");
     }
 
     Ok(())
