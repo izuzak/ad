@@ -4,13 +4,13 @@
 //! tree-sitter parser and a highlights .scm file for driving the highlighting.
 use crate::{
     buffer::{Buffer, GapBuffer, SliceIter},
-    dot::{LineRange, Range},
+    dot::Range,
     term::Style,
 };
 use libloading::{Library, Symbol};
 use std::collections::HashMap;
 use std::{
-    cmp::{max, Ord, Ordering, PartialOrd},
+    cmp::{max, min, Ord, Ordering, PartialOrd},
     fmt,
     iter::Peekable,
     ops::{Deref, DerefMut},
@@ -153,9 +153,24 @@ impl Tokenizer {
                 }
             }
         }
+
+        // Compound queries such as the example below can result in duplicate nodes being returned
+        // from the caputures iterator.
+        //
+        // (macro_invocation
+        //   macro: (identifier) @function.macro
+        //   "!" @function.macro)
+        // TODO: compress adjacent ranges
+        self.ranges.sort_unstable();
+        self.ranges.dedup();
     }
 
-    pub fn iter_tokenized_lines_from(&self, line: usize, b: &Buffer) -> LineIter<'_> {
+    pub fn iter_tokenized_lines_from(
+        &self,
+        line: usize,
+        b: &Buffer,
+        load_exec_range: Option<(bool, Range)>,
+    ) -> LineIter<'_> {
         let line_endings = b.txt.byte_line_endings();
         let start_byte = if line == 0 {
             0
@@ -163,103 +178,21 @@ impl Tokenizer {
             line_endings[line - 1] + 1
         };
 
+        let dot_range = ByteRange::from_range(b.dot.as_range(), b);
+        let load_exec_range =
+            load_exec_range.map(|(is_load, r)| (is_load, ByteRange::from_range(r, b)));
+
         LineIter {
             names: self.q.capture_names(),
             line_endings,
             ranges: &self.ranges,
             start_byte,
             line,
-            dot_range: ByteRange { from: 0, to: 12 },
-            load_exec_range: None,
+            dot_range,
+            load_exec_range,
         }
     }
-
-    // Tokenizing and rendering a line:
-    // - inputs: Buffer, col_off, y, lpad, screen_cols, dot_range, tabstop
-    // - compute:
-    //   - max_cols (screen_cols - lpad)
-    //   - start and end character offsets within the line
-    //   - required padding
-    // pub fn styled_line(
-    //     &self,
-    //     b: &Buffer,
-    //     // col_off: usize,
-    //     // tabstop: usize,
-    //     y: usize,
-    //     // lpad: usize,
-    //     // screen_cols: usize,
-    //     load_exec_range: Option<(bool, Range)>,
-    //     cs: &ColorScheme,
-    // ) -> String {
-    //     let slice = b.txt.line(y);
-    //     let byte_from = slice.from_byte();
-    //     let len = b.txt.line_len_chars(y);
-    //     let byte_to = byte_from + len;
-    //     // let max_cols = screen_cols - lpad;
-
-    //     // FIXME: handle col_off
-    //     // let (start, end, truncated) = start_end_chars(slice, tabstop, col_off, max_cols);
-    //     let tokens = self.tokenize_line(byte_from, byte_to);
-
-    //     let dot_range = b.dot.line_range(y, b).map(|lr| map_line_range(lr, len));
-    //     let mut tokens = match dot_range {
-    //         Some((start, end)) => {
-    //             Tokens::Multi(tokens.with_highlighted_dot(start, end, len, TK_DOT))
-    //         }
-    //         None => tokens,
-    //     };
-
-    //     match load_exec_range {
-    //         Some((is_load, rng)) if !b.dot.contains_range(&rng) => {
-    //             if let Some((start, end)) = rng.line_range(y, b).map(|lr| map_line_range(lr, len)) {
-    //                 let ty = if is_load { TK_LOAD } else { TK_EXEC };
-    //                 tokens = Tokens::Multi(tokens.with_highlighted_dot(start, end, len, ty));
-    //             }
-    //         }
-
-    //         _ => (),
-    //     }
-
-    //     let tks = match tokens {
-    //         Tokens::Single(tk) => vec![tk],
-    //         Tokens::Multi(tks) => tks,
-    //     };
-
-    //     let mut buf = String::with_capacity(len);
-    //     let mut post: Option<Vec<Style>> = None;
-    //     let mut idx = 0;
-
-    //     for tk in tks.into_iter() {
-    //         if tk.i > 0 {
-    //             buf.extend(slice.chars().skip(idx).take(tk.i - idx));
-    //         }
-
-    //         if let Some(styles) = post {
-    //             for s in styles {
-    //                 buf.push_str(&s.to_string());
-    //             }
-    //         }
-
-    //         post = tk.push_styles(cs, &mut buf);
-    //         idx = tk.i;
-    //     }
-
-    //     buf
-    // }
 }
-
-// // FIXME: need to convert char indices into byte indices here
-// #[inline]
-// fn map_line_range(lr: LineRange, len: usize, b: &Buffer) -> (usize, usize) {
-//     match lr {
-//         // LineRange is an inclusive range so we need to insert after `end` if its
-//         // not the end of the line
-//         LineRange::Partial { start, end, .. } => (start, end + 1),
-//         LineRange::FromStart { end, .. } => (0, end + 1),
-//         LineRange::ToEnd { start, .. } => (start, len),
-//         LineRange::Full { .. } => (0, len),
-//     }
-// }
 
 // #[inline]
 // fn start_end_chars(
@@ -328,6 +261,15 @@ pub(crate) struct ByteRange {
 }
 
 impl ByteRange {
+    fn from_range(r: Range, b: &Buffer) -> Self {
+        let Range { start, end, .. } = r;
+
+        Self {
+            from: b.txt.char_to_byte(start.idx),
+            to: b.txt.char_to_byte(end.idx),
+        }
+    }
+
     #[inline]
     fn intersects(&self, start_byte: usize, end_byte: usize) -> bool {
         self.from <= end_byte && start_byte <= self.to
@@ -371,26 +313,34 @@ impl RangeToken<'_> {
             .or(cs.get(TK_DEFAULT))
             .expect("to have default styles");
 
-        let mut post = Vec::with_capacity(styles.len());
-
         for s in styles {
             buf.push_str(&s.to_string());
-            match s {
-                Style::Bold => post.push(Style::NoBold),
-                Style::Italic => post.push(Style::NoItalic),
-                Style::Underline => post.push(Style::NoUnderline),
-                Style::Reverse => post.push(Style::NoReverse),
-                _ => (),
-            }
         }
 
         let (l, r) = slice.as_strs();
         buf.push_str(l);
         buf.push_str(r);
+        buf.push_str(&Style::Reset.to_string());
+    }
 
-        for s in post.into_iter() {
-            buf.push_str(&s.to_string());
-        }
+    #[inline]
+    fn split(self, at: usize) -> (Self, Self) {
+        (
+            RangeToken {
+                ty: self.ty,
+                r: ByteRange {
+                    from: self.r.from,
+                    to: at,
+                },
+            },
+            RangeToken {
+                ty: self.ty,
+                r: ByteRange {
+                    from: at,
+                    to: self.r.to,
+                },
+            },
+        )
     }
 }
 
@@ -426,6 +376,25 @@ pub struct LineIter<'a> {
     load_exec_range: Option<(bool, ByteRange)>,
 }
 
+fn map_range(
+    ty: &str,
+    br: ByteRange,
+    start_byte: usize,
+    end_byte: usize,
+) -> Option<RangeToken<'_>> {
+    if br.intersects(start_byte, end_byte) {
+        Some(RangeToken {
+            ty,
+            r: ByteRange {
+                from: max(br.from, start_byte),
+                to: min(br.to, end_byte),
+            },
+        })
+    } else {
+        None
+    }
+}
+
 impl<'a> Iterator for LineIter<'a> {
     type Item = TokenIter<'a>;
 
@@ -437,22 +406,18 @@ impl<'a> Iterator for LineIter<'a> {
         let start_byte = self.start_byte;
         let end_byte = self.line_endings[self.line];
 
-        let dot_range = if self.dot_range.intersects(start_byte, end_byte) {
-            Some(self.dot_range)
-        } else {
-            None
-        };
-        let load_exec_range = self.load_exec_range.and_then(|(is_load, r)| {
-            if r.intersects(start_byte, end_byte) {
-                Some((is_load, r))
-            } else {
-                None
-            }
-        });
+        self.line += 1;
+        self.start_byte = end_byte + 1;
 
         // Determine tokens required for the next line
         let held: Option<RangeToken<'_>>;
         let ranges: Peekable<slice::Iter<'_, SyntaxRange>>;
+
+        let dot_range = map_range(TK_DOT, self.dot_range, start_byte, end_byte);
+        let load_exec_range = self.load_exec_range.and_then(|(is_load, br)| {
+            let ty = if is_load { TK_LOAD } else { TK_EXEC };
+            map_range(ty, br, start_byte, end_byte)
+        });
 
         loop {
             match self.ranges.first() {
@@ -520,24 +485,110 @@ impl<'a> Iterator for LineIter<'a> {
             }
         }
 
-        self.line += 1;
-        self.start_byte = end_byte + 1;
-
         Some(TokenIter {
             start_byte,
             end_byte,
             names: self.names,
             ranges,
             held,
+            dot_held: None,
             dot_range,
             load_exec_range,
         })
     }
 }
 
+type Rt<'a> = RangeToken<'a>;
+
+#[derive(Debug, PartialEq, Eq)]
+enum Held<'a> {
+    One(Rt<'a>),
+    Two(Rt<'a>, Rt<'a>),
+    Three(Rt<'a>, Rt<'a>, Rt<'a>),
+    Four(Rt<'a>, Rt<'a>, Rt<'a>, Rt<'a>),
+    Five(Rt<'a>, Rt<'a>, Rt<'a>, Rt<'a>, Rt<'a>),
+}
+
+impl Held<'_> {
+    fn byte_from_to(&self) -> (usize, usize) {
+        match self {
+            Held::One(a) => (a.r.from, a.r.to),
+            Held::Two(a, b) => (a.r.from, b.r.to),
+            Held::Three(a, _, b) => (a.r.from, b.r.to),
+            Held::Four(a, _, _, b) => (a.r.from, b.r.to),
+            Held::Five(a, _, _, _, b) => (a.r.from, b.r.to),
+        }
+    }
+
+    fn split(self, at: usize) -> (Self, Self) {
+        use Held::*;
+
+        match self {
+            One(a) => {
+                let (l, r) = a.split(at);
+                (One(l), One(r))
+            }
+
+            Two(a, b) => {
+                if at == a.r.to {
+                    (One(a), One(b))
+                } else if a.r.contains(at, at) {
+                    let (l, r) = a.split(at);
+                    (One(l), Two(r, b))
+                } else {
+                    let (l, r) = b.split(at);
+                    (Two(a, l), One(r))
+                }
+            }
+
+            Three(a, b, c) => {
+                if at == a.r.to {
+                    (One(a), Two(b, c))
+                } else if at == b.r.to {
+                    (Two(a, b), One(c))
+                } else if a.r.contains(at, at) {
+                    let (l, r) = a.split(at);
+                    (One(l), Three(r, b, c))
+                } else if b.r.contains(at, at) {
+                    let (l, r) = b.split(at);
+                    (Two(a, l), Two(r, c))
+                } else {
+                    let (l, r) = c.split(at);
+                    (Three(a, b, l), One(r))
+                }
+            }
+
+            Four(_, _, _, _) => unreachable!("only called for 1-3"),
+            Five(_, _, _, _, _) => unreachable!("only called for 1-3"),
+        }
+    }
+
+    fn join(self, other: Self) -> Self {
+        use Held::*;
+
+        match (self, other) {
+            (One(a), One(b)) => Two(a, b),
+            (One(a), Two(b, c)) => Three(a, b, c),
+            (One(a), Three(b, c, d)) => Four(a, b, c, d),
+            (One(a), Four(b, c, d, e)) => Five(a, b, c, d, e),
+
+            (Two(a, b), One(c)) => Three(a, b, c),
+            (Two(a, b), Two(c, d)) => Four(a, b, c, d),
+            (Two(a, b), Three(c, d, e)) => Five(a, b, c, d, e),
+
+            (Three(a, b, c), One(d)) => Four(a, b, c, d),
+            (Three(a, b, c), Two(d, e)) => Five(a, b, c, d, e),
+
+            (Four(a, b, c, d), One(e)) => Five(a, b, c, d, e),
+
+            _ => unreachable!("only have a max of 5 held"),
+        }
+    }
+}
+
 /// An iterator of tokens for a single line.
 ///
-/// "normal" ranges will be injected in-between the known syntax regions
+/// "default" ranges will be injected in-between the known syntax regions
 /// so a consumer may treat the output of this iterator as a continous,
 /// non-overlapping set of sub-regions spanning a single line within a
 /// given buffer.
@@ -555,14 +606,13 @@ pub struct TokenIter<'a> {
     /// the following range so we need to stash a Token for yielding
     /// on the next call to .next()
     held: Option<RangeToken<'a>>,
-    dot_range: Option<ByteRange>,
-    load_exec_range: Option<(bool, ByteRange)>,
+    dot_held: Option<Held<'a>>,
+    dot_range: Option<RangeToken<'a>>,
+    load_exec_range: Option<RangeToken<'a>>,
 }
 
-impl<'a> Iterator for TokenIter<'a> {
-    type Item = RangeToken<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+impl<'a> TokenIter<'a> {
+    fn next_without_selections(&mut self) -> Option<RangeToken<'a>> {
         let held = self.held.take();
         if held.is_some() {
             return held;
@@ -571,8 +621,12 @@ impl<'a> Iterator for TokenIter<'a> {
         let next = self.ranges.next()?;
 
         if next.r.from > self.end_byte {
+            // Next available token is after this line and any 'default' held token will
+            // have been emitted above before we hit this point, so we're done.
             return None;
         } else if next.r.to >= self.end_byte {
+            // Last token runs until at least the end of this line so we just need to truncate
+            // to the end of the line and ensure that the following call to .next() returns None.
             self.ranges = [].iter().peekable();
 
             return Some(RangeToken {
@@ -627,5 +681,352 @@ impl<'a> Iterator for TokenIter<'a> {
                 to: next.r.to,
             },
         })
+    }
+
+    fn update_held(&mut self, mut held: Held<'a>, rt: RangeToken<'a>) -> Held<'a> {
+        let (self_from, self_to) = held.byte_from_to();
+        let (from, to) = (rt.r.from, rt.r.to);
+
+        match (from.cmp(&self_from), to.cmp(&self_to)) {
+            (Ordering::Less, _) => unreachable!("only called when rt >= self"),
+
+            (Ordering::Equal, Ordering::Less) => {
+                // hold rt then remaining of held
+                let (_, r) = held.split(to);
+                held = Held::One(rt).join(r);
+            }
+
+            (Ordering::Greater, Ordering::Less) => {
+                // hold held up to rt, rt & held from rt
+                let (l, r) = held.split(from);
+                let (_, r) = r.split(to);
+                held = l.join(Held::One(rt)).join(r);
+            }
+
+            (Ordering::Equal, Ordering::Equal) => {
+                // replace held with rt
+                held = Held::One(rt);
+            }
+
+            (Ordering::Greater, Ordering::Equal) => {
+                // hold held to rt & rt
+                let (l, _) = held.split(from);
+                held = l.join(Held::One(rt));
+            }
+
+            (Ordering::Equal, Ordering::Greater) => {
+                // hold rt, consume to find other held tokens (if any)
+                held = self.find_end_of_selection(Held::One(rt), to);
+            }
+
+            (Ordering::Greater, Ordering::Greater) => {
+                // hold held to rt & rt, consume to find other held tokens (if any)
+                let (l, _) = held.split(from);
+                held = self.find_end_of_selection(l.join(Held::One(rt)), to);
+            }
+        }
+
+        held
+    }
+
+    fn find_end_of_selection(&mut self, mut held: Held<'a>, to: usize) -> Held<'a> {
+        loop {
+            let mut next = match self.next_without_selections() {
+                None => break,
+                Some(next) => next,
+            };
+            if next.r.to <= to {
+                continue; // token is entirely within rt
+            }
+            next.r.from = to;
+            held = held.join(Held::One(next));
+            break;
+        }
+
+        held
+    }
+
+    fn pop(&mut self) -> Option<RangeToken<'a>> {
+        match self.dot_held {
+            None => None,
+            Some(Held::One(a)) => {
+                self.dot_held = None;
+                Some(a)
+            }
+            Some(Held::Two(a, b)) => {
+                self.dot_held = Some(Held::One(b));
+                Some(a)
+            }
+            Some(Held::Three(a, b, c)) => {
+                self.dot_held = Some(Held::Two(b, c));
+                Some(a)
+            }
+            Some(Held::Four(a, b, c, d)) => {
+                self.dot_held = Some(Held::Three(b, c, d));
+                Some(a)
+            }
+            Some(Held::Five(a, b, c, d, e)) => {
+                self.dot_held = Some(Held::Four(b, c, d, e));
+                Some(a)
+            }
+        }
+    }
+}
+
+impl<'a> Iterator for TokenIter<'a> {
+    type Item = RangeToken<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Emit pre-computed held tokens first
+        let next = self.pop();
+        if next.is_some() {
+            return next;
+        }
+
+        // Determine the next token we would emit in the absense of any user selections and then
+        // apply the selections in priority order:
+        //   - dot overwrites original syntax highlighting
+        //   - load/exec overwrite dot
+        #[inline]
+        fn intersects(opt: &Option<RangeToken<'_>>, from: usize, to: usize) -> bool {
+            opt.as_ref()
+                .map(|rt| rt.r.intersects(from, to))
+                .unwrap_or(false)
+        }
+
+        let next = self.next_without_selections()?;
+        let (from, to) = (next.r.from, next.r.to);
+        let mut held = Held::One(next);
+
+        if intersects(&self.dot_range, from, to) {
+            let r = self.dot_range.take().unwrap();
+            held = self.update_held(held, r);
+        }
+
+        let (from, to) = held.byte_from_to();
+        if intersects(&self.load_exec_range, from, to) {
+            let r = self.load_exec_range.take().unwrap();
+            held = self.update_held(held, r);
+        }
+
+        if let Held::One(rt) = held {
+            Some(rt) // held_dot is None so just return the token directly
+        } else {
+            self.dot_held = Some(held);
+            self.pop()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use simple_test_case::test_case;
+
+    fn sr(from: usize, to: usize) -> SyntaxRange {
+        SyntaxRange {
+            cap_idx: Some(0),
+            r: ByteRange { from, to },
+        }
+    }
+
+    fn rt_def(from: usize, to: usize) -> RangeToken<'static> {
+        RangeToken {
+            ty: TK_DEFAULT,
+            r: ByteRange { from, to },
+        }
+    }
+
+    fn rt_dot(from: usize, to: usize) -> RangeToken<'static> {
+        RangeToken {
+            ty: TK_DOT,
+            r: ByteRange { from, to },
+        }
+    }
+
+    fn rt_exe(from: usize, to: usize) -> RangeToken<'static> {
+        RangeToken {
+            ty: TK_EXEC,
+            r: ByteRange { from, to },
+        }
+    }
+
+    fn rt_str(from: usize, to: usize) -> RangeToken<'static> {
+        RangeToken {
+            ty: "string",
+            r: ByteRange { from, to },
+        }
+    }
+
+    // range at start of single token
+    #[test_case(
+        Held::One(rt_str(0, 5)),
+        None,
+        rt_dot(0, 5),
+        &[sr(10, 15)],
+        Held::One(rt_dot(0, 5));
+        "held one range matches held"
+    )]
+    #[test_case(
+        Held::One(rt_str(0, 5)),
+        None,
+        rt_dot(0, 3),
+        &[sr(10, 15)],
+        Held::Two(rt_dot(0, 3), rt_str(3, 5));
+        "held one range start to within held"
+    )]
+    #[test_case(
+        Held::One(rt_str(0, 5)),
+        Some(rt_def(5, 10)),
+        rt_dot(0, 7),
+        &[sr(10, 15), sr(20, 30)],
+        Held::Two(rt_dot(0, 7), rt_def(7, 10));
+        "held one range start to past held but before next token"
+    )]
+    #[test_case(
+        Held::One(rt_str(0, 5)),
+        Some(rt_def(5, 10)),
+        rt_dot(0, 13),
+        &[sr(10, 15), sr(20, 30)],
+        Held::Two(rt_dot(0, 13), rt_str(13, 15));
+        "held one range start to into next token"
+    )]
+    #[test_case(
+        Held::One(rt_str(0, 5)),
+        Some(rt_def(5, 10)),
+        rt_dot(0, 16),
+        &[sr(10, 15), sr(20, 30)],
+        Held::Two(rt_dot(0, 16), rt_def(16, 20));
+        "held one range start to past next token"
+    )]
+    // range within single token
+    #[test_case(
+        Held::One(rt_str(0, 5)),
+        None,
+        rt_dot(3, 5),
+        &[sr(10, 15)],
+        Held::Two(rt_str(0, 3), rt_dot(3, 5));
+        "held one range from within to end of held"
+    )]
+    #[test_case(
+        Held::One(rt_str(0, 5)),
+        None,
+        rt_dot(2, 4),
+        &[sr(10, 15)],
+        Held::Three(rt_str(0, 2), rt_dot(2, 4), rt_str(4, 5));
+        "held one range with to within held"
+    )]
+    #[test_case(
+        Held::One(rt_str(0, 5)),
+        Some(rt_def(5, 10)),
+        rt_dot(3, 7),
+        &[sr(10, 15), sr(20, 30)],
+        Held::Three(rt_str(0, 3), rt_dot(3, 7), rt_def(7, 10));
+        "held one range within to past held but before next token"
+    )]
+    #[test_case(
+        Held::One(rt_str(0, 5)),
+        Some(rt_def(5, 10)),
+        rt_dot(3, 13),
+        &[sr(10, 15), sr(20, 30)],
+        Held::Three(rt_str(0, 3), rt_dot(3, 13), rt_str(13, 15));
+        "held one range within to into next token"
+    )]
+    #[test_case(
+        Held::One(rt_str(0, 5)),
+        Some(rt_def(5, 10)),
+        rt_dot(3, 16),
+        &[sr(10, 15), sr(20, 30)],
+        Held::Three(rt_str(0, 3), rt_dot(3, 16), rt_def(16, 20));
+        "held one range within to past next token"
+    )]
+    // held 2 tokens
+    #[test_case(
+        Held::Two(rt_str(0, 3), rt_dot(3, 5)),
+        None,
+        rt_exe(0, 5),
+        &[sr(10, 15)],
+        Held::One(rt_exe(0, 5));
+        "held two range matches all held"
+    )]
+    #[test_case(
+        Held::Two(rt_str(0, 3), rt_dot(3, 5)),
+        None,
+        rt_exe(2, 5),
+        &[sr(10, 15)],
+        Held::Two(rt_str(0, 2), rt_exe(2, 5));
+        "held two range from within first to end of held"
+    )]
+    #[test_case(
+        Held::Two(rt_str(0, 3), rt_dot(3, 5)),
+        None,
+        rt_exe(4, 5),
+        &[sr(10, 15)],
+        Held::Three(rt_str(0, 3), rt_dot(3, 4), rt_exe(4, 5));
+        "held two range from within second to end of held"
+    )]
+    #[test_case(
+        Held::Two(rt_str(0, 3), rt_dot(3, 5)),
+        Some(rt_def(5, 10)),
+        rt_exe(4, 8),
+        &[sr(10, 15)],
+        Held::Four(rt_str(0, 3), rt_dot(3, 4), rt_exe(4, 8), rt_def(8, 10));
+        "held two range from within second past end of held"
+    )]
+    // held 3 tokens
+    #[test_case(
+        Held::Three(rt_str(0, 3), rt_dot(3, 5), rt_str(5, 8)),
+        None,
+        rt_exe(0, 8),
+        &[sr(10, 15)],
+        Held::One(rt_exe(0, 8));
+        "held three range matches all held"
+    )]
+    #[test_case(
+        Held::Three(rt_str(0, 3), rt_dot(3, 5), rt_str(5, 8)),
+        None,
+        rt_exe(2, 8),
+        &[sr(10, 15)],
+        Held::Two(rt_str(0, 2), rt_exe(2, 8));
+        "held three range from within first to end of held"
+    )]
+    #[test_case(
+        Held::Three(rt_str(0, 3), rt_dot(3, 5), rt_str(5, 8)),
+        None,
+        rt_exe(4, 8),
+        &[sr(10, 15)],
+        Held::Three(rt_str(0, 3), rt_dot(3, 4), rt_exe(4, 8));
+        "held three range from within second to end of held"
+    )]
+    #[test_case(
+        Held::Three(rt_str(0, 3), rt_dot(3, 6), rt_str(6, 9)),
+        None,
+        rt_exe(4, 5),
+        &[sr(10, 15)],
+        Held::Five(rt_str(0, 3), rt_dot(3, 4), rt_exe(4, 5), rt_dot(5, 6), rt_str(6, 9));
+        "held three range from within second"
+    )]
+    #[test]
+    fn update_held(
+        initial: Held<'static>,
+        held: Option<RangeToken<'static>>,
+        r: RangeToken<'static>,
+        ranges: &[SyntaxRange],
+        expected: Held<'static>,
+    ) {
+        let mut it = TokenIter {
+            start_byte: 0,
+            end_byte: 42,
+            names: &["string"],
+            ranges: ranges.iter().peekable(),
+            held,
+            dot_held: None,
+            dot_range: None,
+            load_exec_range: None,
+        };
+
+        let held = it.update_held(initial, r);
+
+        assert_eq!(held, expected);
     }
 }

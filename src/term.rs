@@ -91,6 +91,7 @@ pub enum Style {
     Reset,
 }
 
+// https://gist.github.com/fnky/458719343aabd01cfb17a3a4f7296797#8-16-colors
 impl fmt::Display for Style {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Style::*;

@@ -7,6 +7,9 @@ use ad_editor::{
 use std::{collections::HashMap, error::Error, fs};
 
 const QUERY: &str = "\
+(macro_invocation
+  macro: (identifier) @function.macro
+  \"!\" @function.macro)
 (line_comment) @comment
 (block_comment) @comment
 (char_literal) @string
@@ -36,28 +39,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     let exec_bg: Color = "#Bf616A".try_into().unwrap();
 
     let cs: HashMap<String, Vec<Style>> = [
-        ("default".to_string(), vec![Style::Bg(bg), Style::Fg(fg)]),
-        (
-            "comment".to_string(),
-            vec![Style::Italic, Style::Fg(comment)],
-        ),
-        ("string".to_string(), vec![Style::Fg(string)]),
-        ("dot".to_string(), vec![Style::Fg(fg), Style::Bg(dot_bg)]),
-        ("load".to_string(), vec![Style::Fg(fg), Style::Bg(load_bg)]),
-        ("exec".to_string(), vec![Style::Fg(fg), Style::Bg(exec_bg)]),
-        ("end".to_string(), vec![Style::Bg(bg), Style::Fg(fg)]),
+        ("default", vec![Style::Bg(bg), Style::Fg(fg)]),
+        ("comment", vec![Style::Italic, Style::Fg(comment)]),
+        ("string", vec![Style::Fg(string)]),
+        ("dot", vec![Style::Fg(fg), Style::Bg(dot_bg)]),
+        ("load", vec![Style::Fg(fg), Style::Bg(load_bg)]),
+        ("exec", vec![Style::Fg(fg), Style::Bg(exec_bg)]),
+        ("function.macro", vec![Style::Fg(load_bg)]),
     ]
+    .map(|(s, v)| (s.to_string(), v))
     .into_iter()
     .collect();
 
-    let exec_rng = Some((false, Dot::from_char_indices(56, 73).as_range()));
+    let exec_rng = Some((false, Dot::from_char_indices(56, 90).as_range()));
 
-    for (i, it) in tkz.iter_tokenized_lines_from(0, &b).enumerate() {
+    // for (i, it) in tkz.iter_tokenized_lines_from(0, &b).enumerate() {
+    for it in tkz.iter_tokenized_lines_from(0, &b, exec_rng) {
         let mut buf = String::new();
-        buf.push_str(&format!("{}{i:<2}| ", Style::Fg(exec_bg)));
+        // buf.push_str(&format!("{}{i:<2}| ", Style::Fg(exec_bg)));
         for tk in it {
             tk.render(&mut buf, &b, &cs);
-            buf.push_str(&format!("{}|", Style::Fg(exec_bg)));
+            // buf.push_str(&format!("{}|", Style::Fg(exec_bg)));
         }
         println!("{buf}");
     }
