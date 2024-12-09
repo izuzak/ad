@@ -22,7 +22,7 @@ use crate::{
 };
 use std::{
     char,
-    cmp::min,
+    cmp::{min, Ordering},
     io::{stdin, stdout, Read, Stdin, Stdout, Write},
     panic,
     sync::mpsc::Sender,
@@ -590,6 +590,91 @@ fn render_pending(keys: &[Input]) -> String {
 
     s
 }
+
+use crate::ts::{TokenIter, TK_DEFAULT};
+use std::collections::HashMap;
+
+// FIXME: move to config when it gets rewritten
+type ColorScheme2 = HashMap<String, Vec<Style>>;
+
+fn render_line(
+    b: &Buffer,
+    it: TokenIter<'_>,
+    col_off: usize,
+    max_cols: usize,
+    tabstop: usize,
+    cs: &ColorScheme2,
+) -> String {
+    let mut buf = String::new();
+    let mut to_skip = col_off;
+    let mut cols = 0;
+
+    for tk in it {
+        let styles = cs
+            .get(tk.tag())
+            .or(cs.get(TK_DEFAULT))
+            .expect("to have default styles");
+        let slice = tk.as_slice(b);
+        let mut chars = slice.chars().peekable();
+        let mut spaces = None;
+
+        if to_skip > 0 {
+            for ch in chars.by_ref() {
+                let w = if ch == '\t' {
+                    tabstop
+                } else {
+                    UnicodeWidthChar::width(ch).unwrap_or(1)
+                };
+
+                match to_skip.cmp(&w) {
+                    Ordering::Less => {
+                        spaces = Some(w - to_skip);
+                        break;
+                    }
+                    Ordering::Equal => break,
+                    Ordering::Greater => to_skip -= w,
+                }
+            }
+        }
+
+        for s in styles {
+            buf.push_str(&s.to_string());
+        }
+
+        if let Some(n) = spaces {
+            buf.extend(std::iter::repeat_n(' ', n));
+            cols = n;
+        }
+
+        for ch in chars {
+            let w = if ch == '\t' {
+                tabstop
+            } else {
+                UnicodeWidthChar::width(ch).unwrap_or(1)
+            };
+
+            if cols + w <= max_cols {
+                buf.push(ch);
+                cols += w;
+            } else {
+                break;
+            }
+        }
+
+        buf.push_str(&Style::Reset.to_string());
+    }
+
+    if cols < max_cols {
+        buf.extend(std::iter::repeat_n(' ', max_cols - cols));
+    }
+
+    buf
+}
+
+// FIXME: !! The following functions need to be removed once the new rendering impl is in place
+//   - num_cols
+//   - raw_rline_unchecked
+//   - styled_rline_unchecked
 
 fn num_cols(chars: &[char]) -> usize {
     chars

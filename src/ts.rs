@@ -2,8 +2,25 @@
 //!
 //! For a given language the user needs to provide a .so file containing the compiled
 //! tree-sitter parser and a highlights .scm file for driving the highlighting.
+//!
+//! Producing the token stream for a given buffer is handled in a multi-step process in
+//! order to support caching of tokens per-line and not baking in an explicit rendered
+//! representation (e.g. ANSI terminal escape codes) to the output.
+//!   - The file as a whole is tokenized via tree-sitter using a user provided query
+//!   - Tokens are obtained per-line using a [LineIter] which may be efficiently started
+//!     at a non-zero line offset when needed
+//!   - The [TokenIter] type returned by [LineIter] yields [RangeToken]s containing the
+//!     tags provided by the user in their query
+//!   - [TK_DEFAULT] tokens are injected between those identified by the user's query so
+//!     that the full token stream from a [TokenIter] will always contain the complete
+//!     text of the raw buffer line
+//!   - [RangeToken]s are tagged byte offsets within the parent [Buffer] which may be used
+//!     to extract and render sub-regions of text. In order to implement horizontal scrolling
+//!     and clamping of text based on the available screen columns, a UI implementation will
+//!     need to make use of [unicode_width::UnicodeWidthChar] in order to determine whether
+//!     none, part or all of any given token should be rendered.
 use crate::{
-    buffer::{Buffer, GapBuffer, SliceIter},
+    buffer::{Buffer, GapBuffer, Slice, SliceIter},
     dot::Range,
     term::Style,
 };
@@ -19,14 +36,13 @@ use std::{
 };
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{self as ts, ffi::TSLanguage};
-// use unicode_width::UnicodeWidthChar;
 
-const TK_DEFAULT: &str = "default";
-const TK_DOT: &str = "dot";
-const TK_LOAD: &str = "load";
-const TK_EXEC: &str = "exec";
+pub const TK_DEFAULT: &str = "default";
+pub const TK_DOT: &str = "dot";
+pub const TK_LOAD: &str = "load";
+pub const TK_EXEC: &str = "exec";
 
-// TODO: move to config when it gets rewritten
+// FIXME: move to config when it gets rewritten
 type ColorScheme = HashMap<String, Vec<Style>>;
 
 // Required for us to be able to pass GapBuffers to the tree-sitter API
@@ -194,65 +210,6 @@ impl Tokenizer {
     }
 }
 
-// #[inline]
-// fn start_end_chars(
-//     slice: Slice<'_>,
-//     tabstop: usize,
-//     col_off: usize,
-//     max_cols: usize,
-// ) -> (usize, usize, Option<usize>) {
-//     let mut it = slice.chars().enumerate();
-//     let mut wide = Vec::new();
-//     let mut cols = 0;
-//     let mut col_off = col_off;
-//     let mut start = None;
-//     let mut end = 0;
-
-//     // Determine our start and end characters
-//     loop {
-//         let (i, w) = match it.next() {
-//             Some((_, '\n')) | None => break,
-//             Some((i, '\t')) => {
-//                 wide.push((i, tabstop));
-//                 (i, tabstop)
-//             }
-//             Some((i, c)) => {
-//                 let w = UnicodeWidthChar::width(c).unwrap_or(1);
-//                 if w > 1 {
-//                     wide.push((i, w));
-//                 }
-//                 (i, w)
-//             }
-//         };
-//         if w <= col_off {
-//             col_off -= w;
-//         } else if col_off > 0 {
-//             col_off = 0;
-//             start = Some((i, Some(w - col_off)));
-//             cols += w - col_off;
-//         } else {
-//             if start.is_none() {
-//                 start = Some((i, None))
-//             }
-//             cols += w;
-//         }
-
-//         if cols > max_cols {
-//             break;
-//         }
-
-//         end = i;
-
-//         if cols == max_cols {
-//             break;
-//         }
-//     }
-
-//     let (start, truncated) = start.unwrap_or_default();
-
-//     (start, end, truncated)
-// }
-
 /// Byte offsets within a Buffer
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ByteRange {
@@ -279,6 +236,27 @@ impl ByteRange {
     fn contains(&self, start_byte: usize, end_byte: usize) -> bool {
         self.from <= start_byte && self.to >= end_byte
     }
+
+    /// Convert this [ByteRange] into a [RangeToken] if it intersects with the provided
+    /// start and end point.
+    fn try_as_token<'a>(
+        &self,
+        ty: &'a str,
+        start_byte: usize,
+        end_byte: usize,
+    ) -> Option<RangeToken<'a>> {
+        if self.intersects(start_byte, end_byte) {
+            Some(RangeToken {
+                tag: ty,
+                r: ByteRange {
+                    from: max(self.from, start_byte),
+                    to: min(self.to, end_byte),
+                },
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl From<ts::Range> for ByteRange {
@@ -301,15 +279,24 @@ struct SyntaxRange {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RangeToken<'a> {
-    pub(crate) ty: &'a str,
+    pub(crate) tag: &'a str,
     pub(crate) r: ByteRange,
 }
 
 impl RangeToken<'_> {
+    pub fn tag(&self) -> &str {
+        self.tag
+    }
+
+    pub fn as_slice<'a>(&self, b: &'a Buffer) -> Slice<'a> {
+        b.txt.slice_from_byte_offsets(self.r.from, self.r.to)
+    }
+
+    // use unicode_width::UnicodeWidthChar;
     pub fn render(&self, buf: &mut String, b: &Buffer, cs: &ColorScheme) {
-        let slice = b.txt.slice_from_byte_offsets(self.r.from, self.r.to);
+        let slice = self.as_slice(b);
         let styles = cs
-            .get(self.ty)
+            .get(self.tag)
             .or(cs.get(TK_DEFAULT))
             .expect("to have default styles");
 
@@ -327,14 +314,14 @@ impl RangeToken<'_> {
     fn split(self, at: usize) -> (Self, Self) {
         (
             RangeToken {
-                ty: self.ty,
+                tag: self.tag,
                 r: ByteRange {
                     from: self.r.from,
                     to: at,
                 },
             },
             RangeToken {
-                ty: self.ty,
+                tag: self.tag,
                 r: ByteRange {
                     from: at,
                     to: self.r.to,
@@ -376,25 +363,6 @@ pub struct LineIter<'a> {
     load_exec_range: Option<(bool, ByteRange)>,
 }
 
-fn map_range(
-    ty: &str,
-    br: ByteRange,
-    start_byte: usize,
-    end_byte: usize,
-) -> Option<RangeToken<'_>> {
-    if br.intersects(start_byte, end_byte) {
-        Some(RangeToken {
-            ty,
-            r: ByteRange {
-                from: max(br.from, start_byte),
-                to: min(br.to, end_byte),
-            },
-        })
-    } else {
-        None
-    }
-}
-
 impl<'a> Iterator for LineIter<'a> {
     type Item = TokenIter<'a>;
 
@@ -413,10 +381,10 @@ impl<'a> Iterator for LineIter<'a> {
         let held: Option<RangeToken<'_>>;
         let ranges: Peekable<slice::Iter<'_, SyntaxRange>>;
 
-        let dot_range = map_range(TK_DOT, self.dot_range, start_byte, end_byte);
+        let dot_range = self.dot_range.try_as_token(TK_DOT, start_byte, end_byte);
         let load_exec_range = self.load_exec_range.and_then(|(is_load, br)| {
             let ty = if is_load { TK_LOAD } else { TK_EXEC };
-            map_range(ty, br, start_byte, end_byte)
+            br.try_as_token(ty, start_byte, end_byte)
         });
 
         loop {
@@ -429,7 +397,7 @@ impl<'a> Iterator for LineIter<'a> {
                 // End of known tokens so everything else is just TK_DEFAULT
                 None => {
                     held = Some(RangeToken {
-                        ty: TK_DEFAULT,
+                        tag: TK_DEFAULT,
                         r: ByteRange {
                             from: start_byte,
                             to: end_byte,
@@ -442,7 +410,7 @@ impl<'a> Iterator for LineIter<'a> {
                 // The next range is beyond this line
                 Some(sr) if sr.r.from >= end_byte => {
                     held = Some(RangeToken {
-                        ty: TK_DEFAULT,
+                        tag: TK_DEFAULT,
                         r: ByteRange {
                             from: start_byte,
                             to: end_byte,
@@ -455,7 +423,7 @@ impl<'a> Iterator for LineIter<'a> {
                 // The next range fully contains the line
                 Some(sr) if sr.r.contains(start_byte, end_byte) => {
                     held = Some(RangeToken {
-                        ty: sr.cap_idx.map(|i| self.names[i]).unwrap_or(TK_DEFAULT),
+                        tag: sr.cap_idx.map(|i| self.names[i]).unwrap_or(TK_DEFAULT),
                         r: ByteRange {
                             from: start_byte,
                             to: end_byte,
@@ -470,7 +438,7 @@ impl<'a> Iterator for LineIter<'a> {
                     assert!(sr.r.from < end_byte);
                     if sr.r.from > start_byte {
                         held = Some(RangeToken {
-                            ty: TK_DEFAULT,
+                            tag: TK_DEFAULT,
                             r: ByteRange {
                                 from: start_byte,
                                 to: sr.r.from,
@@ -630,7 +598,7 @@ impl<'a> TokenIter<'a> {
             self.ranges = [].iter().peekable();
 
             return Some(RangeToken {
-                ty: next.cap_idx.map(|i| self.names[i]).unwrap_or(TK_DEFAULT),
+                tag: next.cap_idx.map(|i| self.names[i]).unwrap_or(TK_DEFAULT),
                 r: ByteRange {
                     from: max(next.r.from, self.start_byte),
                     to: self.end_byte,
@@ -643,7 +611,7 @@ impl<'a> TokenIter<'a> {
                 self.ranges = [].iter().peekable();
 
                 self.held = Some(RangeToken {
-                    ty: TK_DEFAULT,
+                    tag: TK_DEFAULT,
                     r: ByteRange {
                         from: next.r.to,
                         to: self.end_byte,
@@ -653,7 +621,7 @@ impl<'a> TokenIter<'a> {
 
             Some(sr) if sr.r.from > next.r.to => {
                 self.held = Some(RangeToken {
-                    ty: TK_DEFAULT,
+                    tag: TK_DEFAULT,
                     r: ByteRange {
                         from: next.r.to,
                         to: sr.r.from,
@@ -663,7 +631,7 @@ impl<'a> TokenIter<'a> {
 
             None if next.r.to < self.end_byte => {
                 self.held = Some(RangeToken {
-                    ty: TK_DEFAULT,
+                    tag: TK_DEFAULT,
                     r: ByteRange {
                         from: next.r.to,
                         to: self.end_byte,
@@ -675,7 +643,7 @@ impl<'a> TokenIter<'a> {
         }
 
         Some(RangeToken {
-            ty: next.cap_idx.map(|i| self.names[i]).unwrap_or(TK_DEFAULT),
+            tag: next.cap_idx.map(|i| self.names[i]).unwrap_or(TK_DEFAULT),
             r: ByteRange {
                 from: max(next.r.from, self.start_byte),
                 to: next.r.to,
@@ -832,28 +800,28 @@ mod tests {
 
     fn rt_def(from: usize, to: usize) -> RangeToken<'static> {
         RangeToken {
-            ty: TK_DEFAULT,
+            tag: TK_DEFAULT,
             r: ByteRange { from, to },
         }
     }
 
     fn rt_dot(from: usize, to: usize) -> RangeToken<'static> {
         RangeToken {
-            ty: TK_DOT,
+            tag: TK_DOT,
             r: ByteRange { from, to },
         }
     }
 
     fn rt_exe(from: usize, to: usize) -> RangeToken<'static> {
         RangeToken {
-            ty: TK_EXEC,
+            tag: TK_EXEC,
             r: ByteRange { from, to },
         }
     }
 
     fn rt_str(from: usize, to: usize) -> RangeToken<'static> {
         RangeToken {
-            ty: "string",
+            tag: "string",
             r: ByteRange { from, to },
         }
     }
