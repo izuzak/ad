@@ -256,10 +256,21 @@ impl GapBuffer {
     }
 
     pub fn byte_line_endings(&self) -> Vec<usize> {
-        self.line_endings
+        let mut endings: Vec<_> = self
+            .line_endings
             .keys()
             .map(|i| self.raw_byte_to_byte(*i))
-            .collect()
+            .collect();
+        let eob = self.len();
+
+        match endings.last() {
+            Some(&idx) if idx != eob => {
+                endings.push(eob);
+            }
+            _ => (),
+        }
+
+        endings
     }
 
     /// Clear the contents of the buffer.
