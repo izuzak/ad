@@ -1,20 +1,119 @@
 //! A minimal config file format for ad
-use crate::{key::Input, mode::normal_mode, term::Color, trie::Trie};
-use std::{env, fs, io};
+use crate::{
+    buffer::Buffer,
+    key::Input,
+    mode::normal_mode,
+    term::{Color, Style},
+    trie::Trie,
+};
+use std::{collections::HashMap, env, fs, io};
+
+pub const TK_DEFAULT: &str = "default";
+pub const TK_DOT: &str = "dot";
+pub const TK_LOAD: &str = "load";
+pub const TK_EXEC: &str = "exec";
+
+/// A colorscheme for rendering the UI.
+///
+/// UI elements are available as properties and syntax stylings are available as a map of string
+/// tag to [Style]s that should be applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColorScheme {
+    pub bg: Color,
+    pub fg: Color,
+    pub bar_bg: Color,
+    pub signcol_fg: Color,
+    pub minibuffer_hl: Color,
+    pub syntax: HashMap<String, Vec<Style>>,
+}
+
+impl Default for ColorScheme {
+    fn default() -> Self {
+        let bg: Color = "#1B1720".try_into().unwrap();
+        let fg: Color = "#E6D29E".try_into().unwrap();
+        let dot_bg: Color = "#336677".try_into().unwrap();
+        let load_bg: Color = "#957FB8".try_into().unwrap();
+        let exec_bg: Color = "#Bf616A".try_into().unwrap();
+        let comment: Color = "#624354".try_into().unwrap();
+        let constant: Color = "#FF9E3B".try_into().unwrap();
+        let type_: Color = "#7E9CD8".try_into().unwrap();
+        let function: Color = "#957FB8".try_into().unwrap();
+        let module: Color = "#2D4F67".try_into().unwrap();
+        let keyword: Color = "#Bf616A".try_into().unwrap();
+        let punctuation: Color = "#DCA561".try_into().unwrap();
+        let string: Color = "#61DCA5".try_into().unwrap();
+
+        let syntax = [
+            (TK_DEFAULT, vec![Style::Bg(bg), Style::Fg(fg)]),
+            (TK_DOT, vec![Style::Fg(fg), Style::Bg(dot_bg)]),
+            (TK_LOAD, vec![Style::Fg(fg), Style::Bg(load_bg)]),
+            (TK_EXEC, vec![Style::Fg(fg), Style::Bg(exec_bg)]),
+            ("character", vec![Style::Bold, Style::Fg(string)]),
+            ("comment", vec![Style::Italic, Style::Fg(comment)]),
+            ("constant", vec![Style::Fg(constant)]),
+            ("function", vec![Style::Fg(function)]),
+            ("string", vec![Style::Fg(string)]),
+            ("type", vec![Style::Fg(type_)]),
+            ("variable", vec![Style::Fg(load_bg)]),
+            ("keyword", vec![Style::Fg(keyword)]),
+            ("module", vec![Style::Fg(module)]),
+            ("punctuation", vec![Style::Fg(punctuation)]),
+        ]
+        .map(|(s, v)| (s.to_string(), v))
+        .into_iter()
+        .collect();
+
+        Self {
+            bg,
+            fg,
+            bar_bg: "#4E415C".try_into().unwrap(),
+            signcol_fg: "#544863".try_into().unwrap(),
+            minibuffer_hl: "#3E3549".try_into().unwrap(),
+            syntax,
+        }
+    }
+}
+
+impl ColorScheme {
+    /// Determine UI [Style]s to be applied for a given syntax tag.
+    ///
+    /// If the full tag does not have associated styling but its dotted prefix does (e.g.
+    /// "function.macro" -> "function") then the styling of the prefix is used. Otherwise default
+    /// styling will be used ([TK_DEFAULT]).
+    pub fn styles_for(&self, tag: &str) -> &[Style] {
+        match self.syntax.get(tag) {
+            Some(styles) => styles,
+            None => tag
+                .split_once('.')
+                .and_then(|(prefix, _)| self.syntax.get(prefix))
+                .or(self.syntax.get(TK_DEFAULT))
+                .expect("to have default styles"),
+        }
+    }
+}
+
+/// Config for determining which Tree-Sitter language parser should be used for a given file
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TsConfig {
+    pub(crate) lang: String,
+    pub(crate) extensions: Vec<String>,
+    pub(crate) first_lines: Vec<String>,
+}
 
 /// Editor level configuration
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    pub(crate) tabstop: usize,
-    pub(crate) expand_tab: bool,
-    pub(crate) auto_mount: bool,
-    pub(crate) match_indent: bool,
-    pub(crate) status_timeout: u64,
-    pub(crate) double_click_ms: u128,
-    pub(crate) minibuffer_lines: usize,
-    pub(crate) find_command: String,
-    pub(crate) colorscheme: ColorScheme,
-    pub(crate) bindings: Trie<Input, String>,
+    pub tabstop: usize,
+    pub expand_tab: bool,
+    pub auto_mount: bool,
+    pub match_indent: bool,
+    pub status_timeout: u64,
+    pub double_click_ms: u128,
+    pub minibuffer_lines: usize,
+    pub find_command: String,
+    pub colorscheme: ColorScheme,
+    pub bindings: Trie<Input, String>,
+    pub ts_config: Vec<TsConfig>,
 }
 
 impl Default for Config {
@@ -30,50 +129,11 @@ impl Default for Config {
             find_command: "fd -t f".to_string(),
             colorscheme: ColorScheme::default(),
             bindings: Trie::from_pairs(Vec::new()).unwrap(),
-        }
-    }
-}
-
-/// A colorscheme for the terminal UI
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ColorScheme {
-    // ui
-    pub(crate) bg: Color,
-    pub(crate) fg: Color,
-    pub(crate) dot_bg: Color,
-    pub(crate) load_bg: Color,
-    pub(crate) exec_bg: Color,
-    pub(crate) bar_bg: Color,
-    pub(crate) signcol_fg: Color,
-    pub(crate) minibuffer_hl: Color,
-    // syntax
-    pub(crate) comment: Color,
-    pub(crate) keyword: Color,
-    pub(crate) control_flow: Color,
-    pub(crate) definition: Color,
-    pub(crate) punctuation: Color,
-    pub(crate) string: Color,
-}
-
-impl Default for ColorScheme {
-    fn default() -> Self {
-        Self {
-            // ui
-            bg: "#1B1720".try_into().unwrap(),
-            fg: "#E6D29E".try_into().unwrap(),
-            dot_bg: "#336677".try_into().unwrap(),
-            load_bg: "#957FB8".try_into().unwrap(),
-            exec_bg: "#Bf616A".try_into().unwrap(),
-            bar_bg: "#4E415C".try_into().unwrap(),
-            signcol_fg: "#544863".try_into().unwrap(),
-            minibuffer_hl: "#3E3549".try_into().unwrap(),
-            // syntax
-            comment: "#624354".try_into().unwrap(),
-            keyword: "#Bf616A".try_into().unwrap(),
-            control_flow: "#7E9CD8".try_into().unwrap(),
-            definition: "#957FB8".try_into().unwrap(),
-            punctuation: "#DCA561".try_into().unwrap(),
-            string: "#61DCA5".try_into().unwrap(),
+            ts_config: vec![TsConfig {
+                lang: "rust".to_owned(),
+                extensions: vec!["rs".to_owned()],
+                first_lines: Vec::new(),
+            }],
         }
     }
 }
@@ -93,6 +153,21 @@ impl Config {
             Ok(cfg) => Ok(cfg),
             Err(e) => Err(format!("Invalid config file: {e}")),
         }
+    }
+
+    /// Check to see if there is a known tree-sitter configuration for this buffer
+    pub fn ts_lang_for_buffer(&self, b: &Buffer) -> Option<&str> {
+        let os_ext = b.path()?.extension()?;
+        let ext = os_ext.to_str()?;
+        let first_line = b.line(0).map(|l| l.to_string()).unwrap_or_default();
+
+        self.ts_config
+            .iter()
+            .find(|c| {
+                c.extensions.iter().any(|e| e == ext)
+                    || c.first_lines.iter().any(|l| first_line.starts_with(l))
+            })
+            .map(|c| c.lang.as_str())
     }
 
     /// Attempt to parse the given file content as a Config file. If the file is invalid then an
@@ -173,20 +248,21 @@ impl Config {
             "match-indent" => self.match_indent = parse_bool(prop, val)?,
 
             // Colors
-            "bg-color" => self.colorscheme.bg = parse_color(prop, val)?,
-            "fg-color" => self.colorscheme.fg = parse_color(prop, val)?,
-            "dot-bg-color" => self.colorscheme.dot_bg = parse_color(prop, val)?,
-            "load-bg-color" => self.colorscheme.load_bg = parse_color(prop, val)?,
-            "exec-bg-color" => self.colorscheme.exec_bg = parse_color(prop, val)?,
-            "bar-bg-color" => self.colorscheme.bar_bg = parse_color(prop, val)?,
-            "signcol-fg-color" => self.colorscheme.signcol_fg = parse_color(prop, val)?,
-            "minibuffer-hl-color" => self.colorscheme.minibuffer_hl = parse_color(prop, val)?,
-            "comment-color" => self.colorscheme.comment = parse_color(prop, val)?,
-            "keyword-color" => self.colorscheme.keyword = parse_color(prop, val)?,
-            "control-flow-color" => self.colorscheme.control_flow = parse_color(prop, val)?,
-            "definition-color" => self.colorscheme.definition = parse_color(prop, val)?,
-            "punctuation-color" => self.colorscheme.punctuation = parse_color(prop, val)?,
-            "string-color" => self.colorscheme.string = parse_color(prop, val)?,
+            // !! Ignored for now so that parsing config still works while things move to the new format
+            "bg-color" => (),
+            "fg-color" => (),
+            "dot-bg-color" => (),
+            "load-bg-color" => (),
+            "exec-bg-color" => (),
+            "bar-bg-color" => (),
+            "signcol-fg-color" => (),
+            "minibuffer-hl-color" => (),
+            "comment-color" => (),
+            "keyword-color" => (),
+            "control-flow-color" => (),
+            "definition-color" => (),
+            "punctuation-color" => (),
+            "string-color" => (),
 
             _ => return Err(format!("'{prop}' is not a known config property")),
         }
@@ -210,11 +286,6 @@ fn parse_bool(prop: &str, val: &str) -> Result<bool, String> {
             "expected true/false for '{prop}' but found '{val}'"
         )),
     }
-}
-
-fn parse_color(prop: &str, val: &str) -> Result<Color, String> {
-    Color::try_from(val)
-        .map_err(|_| format!("expected #RRGGBB string for '{prop}' but found '{val}'"))
 }
 
 fn try_parse_binding(input: &str) -> Result<(Vec<Input>, String), String> {

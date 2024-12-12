@@ -83,44 +83,6 @@ impl Range {
             self.end = c;
         }
     }
-
-    pub(crate) fn line_range(&self, y: usize, b: &Buffer) -> Option<LineRange> {
-        let (y_start, x_start) = self.start.as_yx(b);
-        let (y_end, x_end) = self.end.as_yx(b);
-
-        if y == y_start {
-            if y_start == y_end {
-                Some(LineRange::Partial {
-                    y: y_start,
-                    start: x_start,
-                    end: x_end,
-                })
-            } else {
-                Some(LineRange::ToEnd {
-                    y: y_start,
-                    start: x_start,
-                })
-            }
-        } else if y > y_start && y < y_end {
-            Some(LineRange::Full { y })
-        } else if y == y_end {
-            Some(LineRange::FromStart {
-                y: y_end,
-                end: x_end,
-            })
-        } else {
-            None
-        }
-    }
-}
-
-/// A an inclusive range of characters within a single line
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LineRange {
-    Full { y: usize },
-    ToEnd { y: usize, start: usize },
-    FromStart { y: usize, end: usize },
-    Partial { y: usize, start: usize, end: usize },
 }
 
 #[cfg(test)]

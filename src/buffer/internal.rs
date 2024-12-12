@@ -363,6 +363,22 @@ impl GapBuffer {
         chars_to - chars_from
     }
 
+    /// Primarily intended for supplying contiguous ranges of bytes to tree-sitter when
+    /// parsing. Returns a byte slice from the underlying data buffer without entering
+    /// the gap.
+    pub fn maximal_slice_from_offset(&self, byte_offset: usize) -> &[u8] {
+        if byte_offset > self.len() {
+            &[]
+        } else {
+            let i = self.byte_to_raw_byte(byte_offset);
+            match i.cmp(&self.gap_start) {
+                Ordering::Less => &self.data[i..self.gap_start],
+                Ordering::Equal => &self.data[self.gap_end..],
+                Ordering::Greater => &self.data[i..],
+            }
+        }
+    }
+
     /// An exclusive range of characters from the buffer
     pub fn slice_from_byte_offsets(&self, byte_from: usize, byte_to: usize) -> Slice<'_> {
         let from = self.byte_to_raw_byte(byte_from);

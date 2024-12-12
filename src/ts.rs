@@ -20,12 +20,10 @@
 //!     need to make use of [unicode_width::UnicodeWidthChar] in order to determine whether
 //!     none, part or all of any given token should be rendered.
 use crate::{
-    buffer::{Buffer, GapBuffer, Slice, SliceIter},
+    buffer::{GapBuffer, Slice, SliceIter},
     dot::Range,
-    term::Style,
 };
 use libloading::{Library, Symbol};
-use std::collections::HashMap;
 use std::{
     cmp::{max, min, Ord, Ordering, PartialOrd},
     fmt,
@@ -42,8 +40,91 @@ pub const TK_DOT: &str = "dot";
 pub const TK_LOAD: &str = "load";
 pub const TK_EXEC: &str = "exec";
 
-// FIXME: move to config when it gets rewritten
-type ColorScheme = HashMap<String, Vec<Style>>;
+/// Buffer level tree-sitter state for parsing and highlighting
+#[derive(Debug)]
+pub struct TsState {
+    tree: ts::Tree,
+    p: Parser,
+    t: Tokenizer,
+}
+
+impl TsState {
+    pub fn try_new(lang: &str, gb: &GapBuffer) -> Result<Self, String> {
+        // FIXME: these need to be configured
+        let so_dir = "/home/sminez/.local/share/nvim/lazy/nvim-treesitter/parser";
+        let query = "\
+(macro_invocation
+  macro: (identifier) @function.macro
+  \"!\" @function.macro)
+(line_comment) @comment
+(block_comment) @comment
+(outer_doc_comment_marker) @comment
+(inner_doc_comment_marker) @comment
+(char_literal) @character
+(string_literal) @string
+(raw_string_literal) @string";
+
+        let mut p = Parser::try_new(so_dir, lang)?;
+        let tree = p.parse_with(
+            &mut |byte_offset, _| gb.maximal_slice_from_offset(byte_offset),
+            None,
+        );
+        match tree {
+            Some(tree) => {
+                let mut t = p.new_tokenizer(query)?;
+                t.init(tree.root_node(), gb);
+                Ok(Self { p, t, tree })
+            }
+            None => Err("failed to parse file".to_owned()),
+        }
+    }
+
+    pub fn edit(&mut self, ch_start: usize, ch_old_end: usize, ch_new_end: usize, gb: &GapBuffer) {
+        let byte_and_point = |ch: usize| {
+            let byte = gb.char_to_byte(ch);
+            let y = gb.char_to_line(ch);
+            let x = byte - gb.char_to_byte(gb.line_to_char(y));
+
+            (byte, ts::Point::new(x, y))
+        };
+
+        let (start_byte, start_position) = byte_and_point(ch_start);
+        let (old_end_byte, old_end_position) = byte_and_point(ch_old_end);
+        let (new_end_byte, new_end_position) = byte_and_point(ch_new_end);
+        let edit = ts::InputEdit {
+            start_byte,
+            old_end_byte,
+            new_end_byte,
+            start_position,
+            old_end_position,
+            new_end_position,
+        };
+
+        self.tree.edit(&edit);
+
+        let new_tree = self.p.parse_with(
+            &mut |byte_offset, _| gb.maximal_slice_from_offset(byte_offset),
+            Some(&self.tree),
+        );
+
+        if let Some(tree) = new_tree {
+            self.tree = tree;
+            self.t.update(self.tree.root_node(), gb);
+        }
+    }
+
+    #[inline]
+    pub fn iter_tokenized_lines_from(
+        &self,
+        line: usize,
+        gb: &GapBuffer,
+        dot_range: Range,
+        load_exec_range: Option<(bool, Range)>,
+    ) -> LineIter<'_> {
+        self.t
+            .iter_tokenized_lines_from(line, gb, dot_range, load_exec_range)
+    }
+}
 
 // Required for us to be able to pass GapBuffers to the tree-sitter API
 impl<'a> ts::TextProvider<&'a [u8]> for &'a GapBuffer {
@@ -150,14 +231,38 @@ impl fmt::Debug for Tokenizer {
 }
 
 impl Tokenizer {
-    pub fn update(&mut self, line_from: usize, line_to: usize, root: ts::Node<'_>, b: &Buffer) {
-        // TODO: clear ranges within the newly updated region
+    // Compound queries such as the example below can result in duplicate nodes being returned
+    // from the caputures iterator in both the init and update methods. As such, we need to sort
+    // and dedupe the list of resulting syntax ranges in order to correctly ensure that we have
+    // no overlapping or duplicated tokens emitted.
+    //
+    // (macro_invocation
+    //   macro: (identifier) @function.macro
+    //   "!" @function.macro)
 
+    pub fn init(&mut self, root: ts::Node<'_>, gb: &GapBuffer) {
         // This is a streaming-iterator not an interator, hence the odd while-let that follows
-        let mut it = self
-            .cur
-            .set_point_range(ts::Point::new(line_from, 0)..ts::Point::new(line_to, 0))
-            .captures(&self.q, root, &b.txt);
+        let mut it = self.cur.captures(&self.q, root, gb);
+        while let Some((m, _)) = it.next() {
+            for cap_idx in 0..self.q.capture_names().len() {
+                for node in m.nodes_for_capture_index(cap_idx as u32) {
+                    self.ranges.push(SyntaxRange {
+                        r: node.range().into(),
+                        cap_idx: Some(cap_idx),
+                    });
+                }
+            }
+        }
+
+        self.ranges.sort_unstable();
+        self.ranges.dedup();
+    }
+
+    pub fn update(&mut self, root: ts::Node<'_>, gb: &GapBuffer) {
+        // This is a streaming-iterator not an interator, hence the odd while-let that follows
+        let mut it = self.cur.captures(&self.q, root, gb);
+        // FIXME: this is really inefficient. Ideally we should be able to apply a diff here
+        self.ranges.clear();
 
         while let Some((m, _)) = it.next() {
             for cap_idx in 0..self.q.capture_names().len() {
@@ -170,43 +275,26 @@ impl Tokenizer {
             }
         }
 
-        // Compound queries such as the example below can result in duplicate nodes being returned
-        // from the caputures iterator.
-        //
-        // (macro_invocation
-        //   macro: (identifier) @function.macro
-        //   "!" @function.macro)
-        // TODO: compress adjacent ranges
         self.ranges.sort_unstable();
         self.ranges.dedup();
     }
 
+    #[inline]
     pub fn iter_tokenized_lines_from(
         &self,
         line: usize,
-        b: &Buffer,
+        gb: &GapBuffer,
+        dot_range: Range,
         load_exec_range: Option<(bool, Range)>,
     ) -> LineIter<'_> {
-        let line_endings = b.txt.byte_line_endings();
-        let start_byte = if line == 0 {
-            0
-        } else {
-            line_endings[line - 1] + 1
-        };
-
-        let dot_range = ByteRange::from_range(b.dot.as_range(), b);
-        let load_exec_range =
-            load_exec_range.map(|(is_load, r)| (is_load, ByteRange::from_range(r, b)));
-
-        LineIter {
-            names: self.q.capture_names(),
-            line_endings,
-            ranges: &self.ranges,
-            start_byte,
+        LineIter::new(
             line,
+            gb,
             dot_range,
             load_exec_range,
-        }
+            self.q.capture_names(),
+            &self.ranges,
+        )
     }
 }
 
@@ -218,12 +306,12 @@ pub(crate) struct ByteRange {
 }
 
 impl ByteRange {
-    fn from_range(r: Range, b: &Buffer) -> Self {
+    fn from_range(r: Range, gb: &GapBuffer) -> Self {
         let Range { start, end, .. } = r;
 
         Self {
-            from: b.txt.char_to_byte(start.idx),
-            to: b.txt.char_to_byte(end.idx),
+            from: gb.char_to_byte(start.idx),
+            to: gb.char_to_byte(end.idx),
         }
     }
 
@@ -272,7 +360,7 @@ impl From<ts::Range> for ByteRange {
 /// matched this range within the buffer. A cap_idx of [None] indicates that this is a
 /// default range for the purposes of syntax highlighting
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SyntaxRange {
+pub(crate) struct SyntaxRange {
     cap_idx: Option<usize>,
     r: ByteRange,
 }
@@ -288,26 +376,8 @@ impl RangeToken<'_> {
         self.tag
     }
 
-    pub fn as_slice<'a>(&self, b: &'a Buffer) -> Slice<'a> {
-        b.txt.slice_from_byte_offsets(self.r.from, self.r.to)
-    }
-
-    // use unicode_width::UnicodeWidthChar;
-    pub fn render(&self, buf: &mut String, b: &Buffer, cs: &ColorScheme) {
-        let slice = self.as_slice(b);
-        let styles = cs
-            .get(self.tag)
-            .or(cs.get(TK_DEFAULT))
-            .expect("to have default styles");
-
-        for s in styles {
-            buf.push_str(&s.to_string());
-        }
-
-        let (l, r) = slice.as_strs();
-        buf.push_str(l);
-        buf.push_str(r);
-        buf.push_str(&Style::Reset.to_string());
+    pub fn as_slice<'a>(&self, gb: &'a GapBuffer) -> Slice<'a> {
+        gb.slice_from_byte_offsets(self.r.from, self.r.to)
     }
 
     #[inline]
@@ -361,6 +431,38 @@ pub struct LineIter<'a> {
     line: usize,
     dot_range: ByteRange,
     load_exec_range: Option<(bool, ByteRange)>,
+}
+
+impl<'a> LineIter<'a> {
+    pub(crate) fn new(
+        line: usize,
+        gb: &GapBuffer,
+        dot_range: Range,
+        load_exec_range: Option<(bool, Range)>,
+        names: &'a [&'a str],
+        ranges: &'a [SyntaxRange],
+    ) -> LineIter<'a> {
+        let line_endings = gb.byte_line_endings();
+        let start_byte = if line == 0 {
+            0
+        } else {
+            line_endings[line - 1] + 1
+        };
+
+        let dot_range = ByteRange::from_range(dot_range, gb);
+        let load_exec_range =
+            load_exec_range.map(|(is_load, r)| (is_load, ByteRange::from_range(r, gb)));
+
+        LineIter {
+            names,
+            line_endings,
+            ranges,
+            start_byte,
+            line,
+            dot_range,
+            load_exec_range,
+        }
+    }
 }
 
 impl<'a> Iterator for LineIter<'a> {
