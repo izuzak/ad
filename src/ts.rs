@@ -52,17 +52,19 @@ impl TsState {
     pub fn try_new(lang: &str, gb: &GapBuffer) -> Result<Self, String> {
         // FIXME: these need to be configured
         let so_dir = "/home/sminez/.local/share/nvim/lazy/nvim-treesitter/parser";
-        let query = "\
+        let query = r##"
 (macro_invocation
   macro: (identifier) @function.macro
-  \"!\" @function.macro)
+  "!" @function.macro)
+
 (line_comment) @comment
 (block_comment) @comment
-(outer_doc_comment_marker) @comment
-(inner_doc_comment_marker) @comment
+
 (char_literal) @character
+
 (string_literal) @string
-(raw_string_literal) @string";
+(raw_string_literal) @string
+"##;
 
         let mut p = Parser::try_new(so_dir, lang)?;
         let tree = p.parse_with(

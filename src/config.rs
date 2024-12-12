@@ -36,12 +36,13 @@ impl Default for ColorScheme {
         let exec_bg: Color = "#Bf616A".try_into().unwrap();
         let comment: Color = "#624354".try_into().unwrap();
         let constant: Color = "#FF9E3B".try_into().unwrap();
-        let type_: Color = "#7E9CD8".try_into().unwrap();
         let function: Color = "#957FB8".try_into().unwrap();
-        let module: Color = "#2D4F67".try_into().unwrap();
         let keyword: Color = "#Bf616A".try_into().unwrap();
-        let punctuation: Color = "#DCA561".try_into().unwrap();
+        let module: Color = "#2D4F67".try_into().unwrap();
+        let punctuation: Color = "#9CABCA".try_into().unwrap();
         let string: Color = "#61DCA5".try_into().unwrap();
+        let type_: Color = "#7E9CD8".try_into().unwrap();
+        let variable: Color = "#DCA561".try_into().unwrap();
 
         let syntax = [
             (TK_DEFAULT, vec![Style::Bg(bg), Style::Fg(fg)]),
@@ -52,12 +53,12 @@ impl Default for ColorScheme {
             ("comment", vec![Style::Italic, Style::Fg(comment)]),
             ("constant", vec![Style::Fg(constant)]),
             ("function", vec![Style::Fg(function)]),
-            ("string", vec![Style::Fg(string)]),
-            ("type", vec![Style::Fg(type_)]),
-            ("variable", vec![Style::Fg(load_bg)]),
             ("keyword", vec![Style::Fg(keyword)]),
             ("module", vec![Style::Fg(module)]),
             ("punctuation", vec![Style::Fg(punctuation)]),
+            ("string", vec![Style::Fg(string)]),
+            ("type", vec![Style::Fg(type_)]),
+            ("variable", vec![Style::Fg(variable)]),
         ]
         .map(|(s, v)| (s.to_string(), v))
         .into_iter()
