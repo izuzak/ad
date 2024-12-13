@@ -79,8 +79,8 @@ impl Config {
 
     /// Check to see if there is a known tree-sitter configuration for this buffer
     pub fn ts_lang_for_buffer(&self, b: &Buffer) -> Option<&str> {
-        let os_ext = b.path()?.extension()?;
-        let ext = os_ext.to_str()?;
+        let os_ext = b.path()?.extension().unwrap_or_default();
+        let ext = os_ext.to_str().unwrap_or_default();
         let first_line = b.line(0).map(|l| l.to_string()).unwrap_or_default();
 
         self.languages
