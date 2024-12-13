@@ -26,7 +26,7 @@ use crate::{
 use libloading::{Library, Symbol};
 use std::{
     cmp::{max, min, Ord, Ordering, PartialOrd},
-    fmt,
+    fmt, fs,
     iter::Peekable,
     ops::{Deref, DerefMut},
     path::Path,
@@ -49,22 +49,17 @@ pub struct TsState {
 }
 
 impl TsState {
-    pub fn try_new(lang: &str, gb: &GapBuffer) -> Result<Self, String> {
-        // FIXME: these need to be configured
-        let so_dir = "/home/sminez/.local/share/nvim/lazy/nvim-treesitter/parser";
-        let query = r##"
-(macro_invocation
-  macro: (identifier) @function.macro
-  "!" @function.macro)
-
-(line_comment) @comment
-(block_comment) @comment
-
-(char_literal) @character
-
-(string_literal) @string
-(raw_string_literal) @string
-"##;
+    pub fn try_new(
+        lang: &str,
+        so_dir: &str,
+        query_dir: &str,
+        gb: &GapBuffer,
+    ) -> Result<Self, String> {
+        let query_path = Path::new(query_dir).join(format!("{lang}.scm"));
+        let query = match fs::read_to_string(query_path) {
+            Ok(s) => s,
+            Err(e) => return Err(format!("unable to read tree-sitter query file: {e}")),
+        };
 
         let mut p = Parser::try_new(so_dir, lang)?;
         let tree = p.parse_with(
@@ -73,7 +68,7 @@ impl TsState {
         );
         match tree {
             Some(tree) => {
-                let mut t = p.new_tokenizer(query)?;
+                let mut t = p.new_tokenizer(&query)?;
                 t.init(tree.root_node(), gb);
                 Ok(Self { p, t, tree })
             }

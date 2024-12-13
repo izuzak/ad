@@ -6,9 +6,10 @@ use crate::{
     mode::normal_mode,
     term::{Color, Styles},
     trie::Trie,
+    util::parent_dir_containing,
 };
 use serde::{de, Deserialize, Deserializer};
-use std::{collections::HashMap, env, fs, io};
+use std::{collections::HashMap, env, fs, io, path::Path};
 use tracing::{error, warn};
 
 pub const TK_DEFAULT: &str = "default";
@@ -103,7 +104,7 @@ impl Config {
             &mut self.tree_sitter.syntax_query_dir,
         ] {
             if s.starts_with("~/") {
-                *s = s.replace("~/", home);
+                *s = s.replacen("~", home, 1);
             }
         }
     }
@@ -217,12 +218,30 @@ pub struct LangConfig {
     pub lsp: Option<LspConfig>,
 }
 
+/// Configuration for running a given language server
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct LspConfig {
+    /// Whether or not this language server should be started when matching buffers are opened
     pub autostart: bool,
+    /// The command to run to start the language server
     pub command: String,
+    /// Additional arguments to pass to the language server command
     pub args: Vec<String>,
+    /// Files or directories to search for in order to determine the project root
     pub roots: Vec<String>,
+}
+
+impl LspConfig {
+    pub fn root_for_buffer<'a>(&self, b: &'a Buffer) -> Option<&'a Path> {
+        let d = b.dir()?;
+        for root in self.roots.iter() {
+            if let Some(p) = parent_dir_containing(d, root) {
+                return Some(p);
+            }
+        }
+
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

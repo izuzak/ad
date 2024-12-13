@@ -181,8 +181,14 @@ impl Buffer {
             ts_state: None,
         };
 
-        if let Some(lang) = config_handle!().ts_lang_for_buffer(&b) {
-            match TsState::try_new(lang, &b.txt) {
+        let cfg = config_handle!();
+        if let Some(lang) = cfg.ts_lang_for_buffer(&b) {
+            match TsState::try_new(
+                lang,
+                &cfg.tree_sitter.parser_dir,
+                &cfg.tree_sitter.syntax_query_dir,
+                &b.txt,
+            ) {
                 Ok(state) => b.ts_state = Some(state),
                 Err(msg) => error!("unable to initialise tree-sitter: {msg}"),
             }
