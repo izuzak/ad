@@ -221,11 +221,10 @@ pub struct LangConfig {
 /// Configuration for running a given language server
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct LspConfig {
-    /// Whether or not this language server should be started when matching buffers are opened
-    pub autostart: bool,
     /// The command to run to start the language server
     pub command: String,
     /// Additional arguments to pass to the language server command
+    #[serde(default)]
     pub args: Vec<String>,
     /// Files or directories to search for in order to determine the project root
     pub roots: Vec<String>,

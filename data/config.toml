@@ -65,8 +65,6 @@ first_lines = ["#!/usr/bin/bash", "#!/usr/bin/sh", "#!/usr/bin/env bash", "#!/us
 [[languages]]
 name = "dart"
 extensions = ["dart"]
-first_lines = []
-lsp.autostart = true
 lsp.command = "dart"
 lsp.args = ["language-server", "--protocol=lsp"]
 lsp.roots = ["melos.yaml", "pubspec.yaml"]
@@ -74,23 +72,29 @@ lsp.roots = ["melos.yaml", "pubspec.yaml"]
 [[languages]]
 name = "graphql"
 extensions = ["graphql"]
-first_lines = []
+
+[[languages]]
+name = "json"
+extensions = ["json"]
+
+[[languages]]
+name = "proto"
+extensions = ["proto"]
 
 [[languages]]
 name = "rust"
 extensions = ["rs"]
-first_lines = []
-lsp.autostart = true
 lsp.command = "rust-analyzer"
-lsp.args = []
 lsp.roots = ["Cargo.toml"]
 
 [[languages]]
 name = "scheme"
 extensions = ["scm"]
-first_lines = []
+
+[[languages]]
+name = "sql"
+extensions = ["sql"]
 
 [[languages]]
 name = "toml"
 extensions = ["toml"]
-first_lines = []
