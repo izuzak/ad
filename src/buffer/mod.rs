@@ -969,17 +969,17 @@ impl Buffer {
         source: Option<Source>,
     ) -> (Cur, Option<String>) {
         let s = normalize_line_endings(s);
-        let n_bytes = s.len();
         let (mut cur, deleted) = match dot {
             Dot::Cur { c } => (c, None),
             Dot::Range { r } => self.delete_range(r, source),
         };
 
+        let idx = cur.idx;
+
         // Inserting an empty string should not be recorded as an edit (and is
         // a no-op for the content of self.txt) but we support it as inserting
         // an empty string while dot is a range has the same effect as a delete.
         if !s.is_empty() {
-            let idx = cur.idx;
             let len = s.chars().count();
             self.txt.insert_str(idx, &s);
 
@@ -993,10 +993,10 @@ impl Buffer {
 
         if let Some(ts) = self.ts_state.as_mut() {
             let ch_old_end = match deleted.as_ref() {
-                Some(s) => cur.idx + s.len(),
-                None => cur.idx,
+                Some(s) => idx + s.chars().count(),
+                None => idx,
             };
-            ts.edit(cur.idx, ch_old_end, cur.idx + n_bytes, &self.txt);
+            ts.edit(idx, ch_old_end, cur.idx, &self.txt);
         }
 
         self.mark_dirty();
@@ -1012,8 +1012,8 @@ impl Buffer {
 
         if let Some(ts) = self.ts_state.as_mut() {
             let ch_old_end = match deleted.as_ref() {
-                Some(s) => cur.idx + s.len(),
-                None => cur.idx,
+                Some(s) => cur.idx + s.chars().count(),
+                None => cur.idx + 1,
             };
             ts.edit(cur.idx, ch_old_end, cur.idx, &self.txt);
         }
