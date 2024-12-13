@@ -155,9 +155,10 @@ pub(crate) fn normal_mode() -> Mode {
         keymap,
         handle_expired_pending: |keys| {
             config_handle!()
-                .bindings
+                .keys
+                .normal
                 .get(keys)
-                .map(|s| Actions::Single(ExecuteString { s: s.clone() }))
+                .map(|ka| ka.as_actions())
         },
     }
 }

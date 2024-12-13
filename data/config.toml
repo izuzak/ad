@@ -1,0 +1,66 @@
+# Config file for the ad text editor
+# For details of the TOML file format see https://toml.io/en/v1.0.0
+
+auto_mount = false
+expand_tab = true
+tabstop = 4
+match_indent = true
+status_timeout = 3
+double_click_ms = 200
+minibuffer_lines = 8
+find_command = "fd -t f"
+
+[tree_sitter]
+parser_dir = "~/.ad/tree-sitter/parsers"
+syntax_query_dir = "~/.ad/tree-sitter/queries"
+
+[colorscheme]
+bg = "#1B1720"
+fg = "#E6D29E"
+bar_bg = "#4E415C"
+signcol_fg = "#544863"
+minibuffer_hl = "#3E3549"
+
+[colorscheme.syntax]
+default = { fg = "#E6D29E", bg = "#1B1720" }
+dot = { fg = "#E6D29E", bg = "#336677" }
+load = { fg = "#E6D29E", bg = "#957FB8" }
+exec = { fg = "#E6D29E", bg = "#Bf616A" }
+comment = { fg = "#624354", italic = true }
+constant = { fg = "#FF9E3B" }
+type = { fg = "#7E9CD8" }
+function = { fg = "#957FB8" }
+module = { fg = "#2D4F67" }
+keyword = { fg = "#Bf616A" }
+punctuation = { fg = "#DCA561" }
+string = { fg = "#61DCA5" }
+character = { fg = "#61DCA5", italic = true }
+
+
+# Key mappings to programs that must be available on $PATH.
+# ~/.ad/bin is auto-added to the path
+[keys.normal]
+"<space> F" = { run = "fmt" }
+">" = { run = "indent" }
+"<" = { run = "unindent" }
+
+
+# Language configuration
+
+[[languages]]
+name = "rust"
+extensions = ["rs"]
+first_lines = []
+lsp.autostart = true
+lsp.command = "rust-analyzer"
+lsp.args = []
+lsp.roots = ["Cargo.toml"]
+
+[[languages]]
+name = "dart"
+extensions = ["dart"]
+first_lines = []
+lsp.autostart = true
+lsp.command = "dart"
+lsp.args = ["language-server", "--protocol=lsp"]
+lsp.roots = ["melos.yaml", "pubspec.yaml"]

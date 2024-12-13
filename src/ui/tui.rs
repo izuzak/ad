@@ -10,7 +10,7 @@ use crate::{
     restore_terminal_state,
     term::{
         clear_screen, enable_alternate_screen, enable_mouse_support, enable_raw_mode, get_termios,
-        get_termsize, register_signal_handler, win_size_changed, CurShape, Cursor, Style,
+        get_termsize, register_signal_handler, win_size_changed, CurShape, Cursor, Style, Styles,
     },
     ts::{LineIter, TokenIter},
     ui::{
@@ -197,17 +197,22 @@ impl Tui {
         if let Some(b) = mb.b {
             for i in mb.top..=mb.bottom {
                 let slice = b.line(i).unwrap();
-                let styles = if i == mb.selected_line_idx {
-                    &[Style::Fg(cs.fg), Style::Bg(cs.minibuffer_hl)]
+                let bg = if i == mb.selected_line_idx {
+                    cs.minibuffer_hl
                 } else {
-                    &[Style::Fg(cs.fg), Style::Bg(cs.bg)]
+                    cs.bg
+                };
+                let styles = Styles {
+                    fg: Some(cs.fg),
+                    bg: Some(bg),
+                    ..Default::default()
                 };
 
                 let mut rline = String::new();
                 let mut cols = 0;
                 render_slice(
                     slice,
-                    styles,
+                    &styles,
                     self.screen_cols,
                     tabstop,
                     &mut 0,
@@ -616,7 +621,7 @@ fn render_pending(keys: &[Input]) -> String {
 #[inline]
 fn render_slice(
     slice: Slice<'_>,
-    styles: &[Style],
+    styles: &Styles,
     max_cols: usize,
     tabstop: usize,
     to_skip: &mut usize,
@@ -645,8 +650,20 @@ fn render_slice(
         }
     }
 
-    for s in styles {
-        buf.push_str(&s.to_string());
+    if let Some(fg) = styles.fg {
+        buf.push_str(&Style::Fg(fg).to_string());
+    }
+    if let Some(bg) = styles.bg {
+        buf.push_str(&Style::Bg(bg).to_string());
+    }
+    if styles.bold {
+        buf.push_str(&Style::Bold.to_string());
+    }
+    if styles.italic {
+        buf.push_str(&Style::Italic.to_string());
+    }
+    if styles.underline {
+        buf.push_str(&Style::Underline.to_string());
     }
 
     if let Some(n) = spaces {
