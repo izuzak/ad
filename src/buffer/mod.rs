@@ -1011,10 +1011,7 @@ impl Buffer {
         };
 
         if let Some(ts) = self.ts_state.as_mut() {
-            let ch_old_end = match deleted.as_ref() {
-                Some(s) => cur.idx + s.chars().count(),
-                None => cur.idx + 1,
-            };
+            let ch_old_end = min(dot.last_cur().idx, self.txt.len_chars());
             ts.edit(cur.idx, ch_old_end, cur.idx, &self.txt);
         }
 
