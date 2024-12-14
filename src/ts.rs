@@ -69,7 +69,7 @@ impl TsState {
         match tree {
             Some(tree) => {
                 let mut t = p.new_tokenizer(&query)?;
-                t.init(tree.root_node(), gb);
+                t.update(tree.root_node(), gb);
                 Ok(Self { p, t, tree })
             }
             None => Err("failed to parse file".to_owned()),
@@ -237,24 +237,6 @@ impl Tokenizer {
     //   macro: (identifier) @function.macro
     //   "!" @function.macro)
 
-    pub fn init(&mut self, root: ts::Node<'_>, gb: &GapBuffer) {
-        // This is a streaming-iterator not an interator, hence the odd while-let that follows
-        let mut it = self.cur.captures(&self.q, root, gb);
-        while let Some((m, _)) = it.next() {
-            for cap_idx in 0..self.q.capture_names().len() {
-                for node in m.nodes_for_capture_index(cap_idx as u32) {
-                    self.ranges.push(SyntaxRange {
-                        r: node.range().into(),
-                        cap_idx: Some(cap_idx),
-                    });
-                }
-            }
-        }
-
-        self.ranges.sort_unstable();
-        self.ranges.dedup();
-    }
-
     pub fn update(&mut self, root: ts::Node<'_>, gb: &GapBuffer) {
         // This is a streaming-iterator not an interator, hence the odd while-let that follows
         let mut it = self.cur.captures(&self.q, root, gb);
@@ -264,8 +246,14 @@ impl Tokenizer {
         while let Some((m, _)) = it.next() {
             for cap_idx in 0..self.q.capture_names().len() {
                 for node in m.nodes_for_capture_index(cap_idx as u32) {
+                    let r = ByteRange::from(node.range());
+                    if let Some(prev) = self.ranges.last() {
+                        if r.from < prev.r.to && prev.r.from < r.to {
+                            continue;
+                        }
+                    }
                     self.ranges.push(SyntaxRange {
-                        r: node.range().into(),
+                        r,
                         cap_idx: Some(cap_idx),
                     });
                 }
