@@ -55,7 +55,7 @@ impl TsState {
         query_dir: &str,
         gb: &GapBuffer,
     ) -> Result<Self, String> {
-        let query_path = Path::new(query_dir).join(format!("{lang}.scm"));
+        let query_path = Path::new(query_dir).join(lang).join("highlights.scm");
         let query = match fs::read_to_string(query_path) {
             Ok(s) => s,
             Err(e) => return Err(format!("unable to read tree-sitter query file: {e}")),
