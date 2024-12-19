@@ -5,6 +5,7 @@ use libc::{
     termios as Termios, BRKINT, CS8, ECHO, ICANON, ICRNL, IEXTEN, ISIG, ISTRIP, IXON, OPOST,
     SA_SIGINFO, SIGWINCH, STDOUT_FILENO, TCSAFLUSH, TIOCGWINSZ, VMIN, VTIME,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     fmt,
     io::{self, Stdout, Write},
@@ -56,11 +57,25 @@ pub unsafe fn register_signal_handler() {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Color {
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Color {
     r: u8,
-    b: u8,
     g: u8,
+    b: u8,
+}
+
+impl Color {
+    pub fn as_rgb_hex_string(&self) -> String {
+        let rgb: u32 = ((self.r as u32) << 16) + ((self.g as u32) << 8) + self.b as u32;
+        format!("#{:0>6X}", rgb)
+    }
+}
+
+impl From<Color> for String {
+    fn from(value: Color) -> Self {
+        value.as_rgb_hex_string()
+    }
 }
 
 impl TryFrom<&str> for Color {
@@ -76,9 +91,30 @@ impl TryFrom<&str> for Color {
     }
 }
 
-#[allow(dead_code)]
+impl TryFrom<String> for Color {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Styles {
+    #[serde(default)]
+    pub fg: Option<Color>,
+    #[serde(default)]
+    pub bg: Option<Color>,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub underline: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Style {
+pub enum Style {
     Fg(Color),
     Bg(Color),
     Bold,
@@ -92,6 +128,7 @@ pub(crate) enum Style {
     Reset,
 }
 
+// https://gist.github.com/fnky/458719343aabd01cfb17a3a4f7296797#8-16-colors
 impl fmt::Display for Style {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Style::*;
@@ -256,5 +293,18 @@ pub(crate) fn get_termios() -> Termios {
         }
 
         t
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_roundtrip() {
+        let s = "#FF9E3B";
+        let c: Color = s.try_into().unwrap();
+
+        assert_eq!(c.as_rgb_hex_string(), s);
     }
 }

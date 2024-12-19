@@ -7,6 +7,7 @@ use crate::{
     fsys::InputFilter,
     key::Input,
     lsp::Coords,
+    ts::{LineIter, TsState},
     util::normalize_line_endings,
     MAX_NAME_LEN, UNNAMED_BUFFER,
 };
@@ -18,14 +19,14 @@ use std::{
     path::{Path, PathBuf},
     time::SystemTime,
 };
-use tracing::debug;
+use tracing::{debug, error};
 
 mod buffers;
 mod edit;
 mod internal;
 
 use edit::{Edit, EditLog, Kind, Txt};
-pub use internal::{Chars, GapBuffer, IdxChars, Slice};
+pub use internal::{Chars, GapBuffer, IdxChars, Slice, SliceIter};
 
 pub(crate) use buffers::{BufferId, Buffers};
 
@@ -158,15 +159,15 @@ pub struct Buffer {
     pub(crate) last_save: SystemTime,
     pub(crate) dirty: bool,
     pub(crate) input_filter: Option<InputFilter>,
+    pub(crate) ts_state: Option<TsState>,
     edit_log: EditLog,
 }
 
 impl Buffer {
     /// As the name implies, this method MUST be called with the full cannonical file path
-    pub(super) fn new_from_canonical_file_path(id: usize, path: PathBuf) -> io::Result<Self> {
+    pub fn new_from_canonical_file_path(id: usize, path: PathBuf) -> io::Result<Self> {
         let (kind, raw) = BufferKind::try_kind_and_content_from_path(path.clone())?;
-
-        Ok(Self {
+        let mut b = Self {
             id,
             kind,
             dot: Dot::default(),
@@ -177,7 +178,23 @@ impl Buffer {
             dirty: false,
             edit_log: EditLog::default(),
             input_filter: None,
-        })
+            ts_state: None,
+        };
+
+        let cfg = config_handle!();
+        if let Some(lang) = cfg.ts_lang_for_buffer(&b) {
+            match TsState::try_new(
+                lang,
+                &cfg.tree_sitter.parser_dir,
+                &cfg.tree_sitter.syntax_query_dir,
+                &b.txt,
+            ) {
+                Ok(state) => b.ts_state = Some(state),
+                Err(msg) => error!("unable to initialise tree-sitter: {msg}"),
+            }
+        }
+
+        Ok(b)
     }
 
     pub(crate) fn state_changed_on_disk(&self) -> Result<bool, String> {
@@ -273,22 +290,24 @@ impl Buffer {
             dirty: false,
             edit_log: Default::default(),
             input_filter: None,
+            ts_state: None,
         }
     }
 
     /// Create a new unnamed buffer with the given content
-    pub fn new_unnamed(id: usize, content: &str) -> Self {
+    pub fn new_unnamed(id: usize, content: impl Into<String>) -> Self {
         Self {
             id,
             kind: BufferKind::Unnamed,
             dot: Dot::default(),
             xdot: Dot::default(),
-            txt: GapBuffer::from(normalize_line_endings(content.to_string())),
+            txt: GapBuffer::from(normalize_line_endings(content.into())),
             cached_rx: 0,
             last_save: SystemTime::now(),
             dirty: false,
             edit_log: EditLog::default(),
             input_filter: None,
+            ts_state: None,
         }
     }
 
@@ -313,6 +332,7 @@ impl Buffer {
             dirty: false,
             edit_log: EditLog::default(),
             input_filter: None,
+            ts_state: None,
         }
     }
 
@@ -330,6 +350,7 @@ impl Buffer {
             dirty: false,
             edit_log: EditLog::default(),
             input_filter: None,
+            ts_state: None,
         }
     }
 
@@ -400,6 +421,32 @@ impl Buffer {
                 s
             })
             .collect()
+    }
+
+    pub fn update_ts_state(&mut self) {
+        if let Some(ts) = self.ts_state.as_mut() {
+            ts.update(&self.txt);
+        }
+    }
+
+    pub fn iter_tokenized_lines_from(
+        &self,
+        line: usize,
+        load_exec_range: Option<(bool, Range)>,
+    ) -> LineIter<'_> {
+        match self.ts_state.as_ref() {
+            Some(ts) => {
+                ts.iter_tokenized_lines_from(line, &self.txt, self.dot.as_range(), load_exec_range)
+            }
+            None => LineIter::new(
+                line,
+                &self.txt,
+                self.dot.as_range(),
+                load_exec_range,
+                &[],
+                &[],
+            ),
+        }
     }
 
     /// The contents of the current [Dot].
@@ -907,6 +954,16 @@ impl Buffer {
         }
 
         self.edit_log.insert_char(cur, ch);
+
+        if let Some(ts) = self.ts_state.as_mut() {
+            let idx = dot.first_cur().idx;
+            let ch_old_end = match deleted.as_ref() {
+                Some(s) => idx + s.chars().count(),
+                None => idx,
+            };
+            ts.edit(idx, ch_old_end, idx + 1, &self.txt);
+        }
+
         self.mark_dirty();
 
         (Cur { idx: idx + 1 }, deleted)
@@ -919,17 +976,18 @@ impl Buffer {
         source: Option<Source>,
     ) -> (Cur, Option<String>) {
         let s = normalize_line_endings(s);
+        let len = s.chars().count();
         let (mut cur, deleted) = match dot {
             Dot::Cur { c } => (c, None),
             Dot::Range { r } => self.delete_range(r, source),
         };
 
+        let idx = cur.idx;
+
         // Inserting an empty string should not be recorded as an edit (and is
         // a no-op for the content of self.txt) but we support it as inserting
         // an empty string while dot is a range has the same effect as a delete.
         if !s.is_empty() {
-            let idx = cur.idx;
-            let len = s.chars().count();
             self.txt.insert_str(idx, &s);
 
             if let (Some(source), Some(f)) = (source, self.input_filter.as_ref()) {
@@ -938,6 +996,15 @@ impl Buffer {
 
             self.edit_log.insert_string(cur, s);
             cur.idx += len;
+        }
+
+        if let Some(ts) = self.ts_state.as_mut() {
+            let idx = dot.first_cur().idx;
+            let ch_old_end = match deleted.as_ref() {
+                Some(s) => idx + s.chars().count(),
+                None => idx,
+            };
+            ts.edit(idx, ch_old_end, idx + len, &self.txt);
         }
 
         self.mark_dirty();
@@ -950,6 +1017,12 @@ impl Buffer {
             Dot::Cur { c } => (self.delete_cur(c, source), None),
             Dot::Range { r } => self.delete_range(r, source),
         };
+
+        if let Some(ts) = self.ts_state.as_mut() {
+            let len = deleted.as_ref().map(|s| s.chars().count()).unwrap_or(1);
+            let ch_old_end = min(dot.first_cur().idx + len, self.txt.len_chars());
+            ts.edit(cur.idx, ch_old_end, cur.idx, &self.txt);
+        }
 
         (cur, deleted)
     }

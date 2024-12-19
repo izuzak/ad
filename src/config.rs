@@ -1,80 +1,54 @@
 //! A minimal config file format for ad
-use crate::{key::Input, mode::normal_mode, term::Color, trie::Trie};
-use std::{env, fs, io};
+use crate::{
+    buffer::Buffer,
+    editor::{Action, Actions},
+    key::Input,
+    mode::normal_mode,
+    term::{Color, Styles},
+    trie::Trie,
+    util::parent_dir_containing,
+};
+use serde::{de, Deserialize, Deserializer};
+use std::{collections::HashMap, env, fs, io, path::Path};
+use tracing::{error, warn};
+
+pub const DEFAULT_CONFIG: &str = include_str!("../data/config.toml");
+
+pub const TK_DEFAULT: &str = "default";
+pub const TK_DOT: &str = "dot";
+pub const TK_LOAD: &str = "load";
+pub const TK_EXEC: &str = "exec";
+
+pub(crate) fn config_path() -> String {
+    let home = env::var("HOME").unwrap();
+    format!("{home}/.ad/config.toml")
+}
 
 /// Editor level configuration
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Config {
-    pub(crate) tabstop: usize,
-    pub(crate) expand_tab: bool,
-    pub(crate) auto_mount: bool,
-    pub(crate) match_indent: bool,
-    pub(crate) status_timeout: u64,
-    pub(crate) double_click_ms: u128,
-    pub(crate) minibuffer_lines: usize,
-    pub(crate) find_command: String,
-    pub(crate) colorscheme: ColorScheme,
-    pub(crate) bindings: Trie<Input, String>,
+    pub tabstop: usize,
+    pub expand_tab: bool,
+    pub auto_mount: bool,
+    pub match_indent: bool,
+    pub status_timeout: u64,
+    pub double_click_ms: u64,
+    pub minibuffer_lines: usize,
+    pub find_command: String,
+
+    #[serde(default)]
+    pub colorscheme: ColorScheme,
+    #[serde(default)]
+    pub tree_sitter: TsConfig,
+    #[serde(default)]
+    pub languages: Vec<LangConfig>,
+    #[serde(default)]
+    pub keys: KeyBindings,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            tabstop: 4,
-            expand_tab: true,
-            auto_mount: false,
-            match_indent: true,
-            status_timeout: 3,
-            double_click_ms: 200,
-            minibuffer_lines: 8,
-            find_command: "fd -t f".to_string(),
-            colorscheme: ColorScheme::default(),
-            bindings: Trie::from_pairs(Vec::new()).unwrap(),
-        }
-    }
-}
-
-/// A colorscheme for the terminal UI
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ColorScheme {
-    // ui
-    pub(crate) bg: Color,
-    pub(crate) fg: Color,
-    pub(crate) dot_bg: Color,
-    pub(crate) load_bg: Color,
-    pub(crate) exec_bg: Color,
-    pub(crate) bar_bg: Color,
-    pub(crate) signcol_fg: Color,
-    pub(crate) minibuffer_hl: Color,
-    // syntax
-    pub(crate) comment: Color,
-    pub(crate) keyword: Color,
-    pub(crate) control_flow: Color,
-    pub(crate) definition: Color,
-    pub(crate) punctuation: Color,
-    pub(crate) string: Color,
-}
-
-impl Default for ColorScheme {
-    fn default() -> Self {
-        Self {
-            // ui
-            bg: "#1B1720".try_into().unwrap(),
-            fg: "#E6D29E".try_into().unwrap(),
-            dot_bg: "#336677".try_into().unwrap(),
-            load_bg: "#957FB8".try_into().unwrap(),
-            exec_bg: "#Bf616A".try_into().unwrap(),
-            bar_bg: "#4E415C".try_into().unwrap(),
-            signcol_fg: "#544863".try_into().unwrap(),
-            minibuffer_hl: "#3E3549".try_into().unwrap(),
-            // syntax
-            comment: "#624354".try_into().unwrap(),
-            keyword: "#Bf616A".try_into().unwrap(),
-            control_flow: "#7E9CD8".try_into().unwrap(),
-            definition: "#957FB8".try_into().unwrap(),
-            punctuation: "#DCA561".try_into().unwrap(),
-            string: "#61DCA5".try_into().unwrap(),
-        }
+        toml::from_str(DEFAULT_CONFIG).unwrap()
     }
 }
 
@@ -82,222 +56,283 @@ impl Config {
     /// Attempt to load a config file from the default location
     pub fn try_load() -> Result<Self, String> {
         let home = env::var("HOME").unwrap();
+        let path = config_path();
 
-        let s = match fs::read_to_string(format!("{home}/.ad/init.conf")) {
-            Ok(s) => s,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Config::default()),
+        let mut cfg = match fs::read_to_string(&path) {
+            Ok(s) => match toml::from_str(&s) {
+                Ok(cfg) => cfg,
+                Err(e) => return Err(format!("Invalid config file: {e}")),
+            },
+
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if fs::create_dir_all(format!("{home}/.ad")).is_ok() {
+                    if let Err(e) = fs::write(path, DEFAULT_CONFIG) {
+                        error!("unable to write default config file: {e}");
+                    }
+                }
+
+                Config::default()
+            }
+
             Err(e) => return Err(format!("Unable to load config file: {e}")),
         };
 
-        match Config::parse(&s) {
-            Ok(cfg) => Ok(cfg),
-            Err(e) => Err(format!("Invalid config file: {e}")),
-        }
-    }
-
-    /// Attempt to parse the given file content as a Config file. If the file is invalid then an
-    /// error message for the user is returned for displaying in the status bar.
-    pub fn parse(contents: &str) -> Result<Self, String> {
-        let mut cfg = Config::default();
-        cfg.update_from(contents)?;
+        cfg.expand_home_dir_refs(&home);
 
         Ok(cfg)
     }
 
+    /// Check to see if there is a known tree-sitter configuration for this buffer
+    pub fn ts_lang_for_buffer(&self, b: &Buffer) -> Option<&str> {
+        let os_ext = b.path()?.extension().unwrap_or_default();
+        let ext = os_ext.to_str().unwrap_or_default();
+        let first_line = b.line(0).map(|l| l.to_string()).unwrap_or_default();
+
+        self.languages
+            .iter()
+            .find(|c| {
+                c.extensions.iter().any(|e| e == ext)
+                    || c.first_lines.iter().any(|l| first_line.starts_with(l))
+            })
+            .map(|c| c.name.as_str())
+    }
+
     pub(crate) fn update_from(&mut self, input: &str) -> Result<(), String> {
-        let mut raw_bindings = Vec::new();
+        warn!("ignoring runtime config update: {input}");
 
-        for line in input.lines() {
-            let line = line.trim_end();
-            if line.starts_with('#') || line.is_empty() {
-                continue;
-            }
+        Err("runtime config updates are not currently supported".to_owned())
+    }
 
-            match line.strip_prefix("set ") {
-                Some(line) => self.try_set_prop(line)?,
-                None => match line.strip_prefix("map ") {
-                    Some(line) => raw_bindings.push(try_parse_binding(line)?),
-                    None => {
-                        return Err(format!(
-                            "'{line}' should be 'set prop=val' or 'map ... => prog'"
-                        ))
-                    }
-                },
+    fn expand_home_dir_refs(&mut self, home: &str) {
+        for s in [
+            &mut self.tree_sitter.parser_dir,
+            &mut self.tree_sitter.syntax_query_dir,
+        ] {
+            if s.starts_with("~/") {
+                *s = s.replacen("~", home, 1);
             }
         }
-
-        if !raw_bindings.is_empty() {
-            // Make sure that none of the user provided bindings clash with Normal mode
-            // bindings as that will mean they never get run
-            let nm = normal_mode();
-            for (keys, _) in raw_bindings.iter() {
-                if nm.keymap.contains_key_or_prefix(keys) {
-                    let mut s = String::new();
-                    for k in keys {
-                        if let Input::Char(c) = k {
-                            s.push(*c);
-                        }
-                    }
-
-                    return Err(format!("mapping '{s}' collides with a Normal mode mapping"));
-                }
-            }
-            let mut bindings = self.bindings.clone();
-            bindings
-                .extend_from_pairs(raw_bindings)
-                .map_err(|s| s.to_owned())?;
-            self.bindings = bindings;
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn try_set_prop(&mut self, input: &str) -> Result<(), String> {
-        let (prop, val) = input
-            .split_once('=')
-            .ok_or_else(|| format!("'{input}' is not a 'set prop=val' statement"))?;
-
-        match prop {
-            // Strings
-            "find-command" => self.find_command = val.trim().to_string(),
-
-            // Numbers
-            "tabstop" => self.tabstop = parse_usize(prop, val)?,
-            "minibuffer-lines" => self.minibuffer_lines = parse_usize(prop, val)?,
-            "status-timeout" => self.status_timeout = parse_usize(prop, val)? as u64,
-            "double-click-ms" => self.double_click_ms = parse_usize(prop, val)? as u128,
-
-            // Flags
-            "expand-tab" => self.expand_tab = parse_bool(prop, val)?,
-            "auto-mount" => self.auto_mount = parse_bool(prop, val)?,
-            "match-indent" => self.match_indent = parse_bool(prop, val)?,
-
-            // Colors
-            "bg-color" => self.colorscheme.bg = parse_color(prop, val)?,
-            "fg-color" => self.colorscheme.fg = parse_color(prop, val)?,
-            "dot-bg-color" => self.colorscheme.dot_bg = parse_color(prop, val)?,
-            "load-bg-color" => self.colorscheme.load_bg = parse_color(prop, val)?,
-            "exec-bg-color" => self.colorscheme.exec_bg = parse_color(prop, val)?,
-            "bar-bg-color" => self.colorscheme.bar_bg = parse_color(prop, val)?,
-            "signcol-fg-color" => self.colorscheme.signcol_fg = parse_color(prop, val)?,
-            "minibuffer-hl-color" => self.colorscheme.minibuffer_hl = parse_color(prop, val)?,
-            "comment-color" => self.colorscheme.comment = parse_color(prop, val)?,
-            "keyword-color" => self.colorscheme.keyword = parse_color(prop, val)?,
-            "control-flow-color" => self.colorscheme.control_flow = parse_color(prop, val)?,
-            "definition-color" => self.colorscheme.definition = parse_color(prop, val)?,
-            "punctuation-color" => self.colorscheme.punctuation = parse_color(prop, val)?,
-            "string-color" => self.colorscheme.string = parse_color(prop, val)?,
-
-            _ => return Err(format!("'{prop}' is not a known config property")),
-        }
-
-        Ok(())
     }
 }
 
-fn parse_usize(prop: &str, val: &str) -> Result<usize, String> {
-    match val.parse() {
-        Ok(num) => Ok(num),
-        Err(_) => Err(format!("expected number for '{prop}' but found '{val}'")),
-    }
+/// A colorscheme for rendering the UI.
+///
+/// UI elements are available as properties and syntax stylings are available as a map of string
+/// tag to [Style]s that should be applied.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ColorScheme {
+    pub bg: Color,
+    pub fg: Color,
+    pub bar_bg: Color,
+    pub signcol_fg: Color,
+    pub minibuffer_hl: Color,
+    pub syntax: HashMap<String, Styles>,
 }
 
-fn parse_bool(prop: &str, val: &str) -> Result<bool, String> {
-    match val {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(format!(
-            "expected true/false for '{prop}' but found '{val}'"
-        )),
-    }
-}
+impl Default for ColorScheme {
+    fn default() -> Self {
+        let bg: Color = "#1B1720".try_into().unwrap();
+        let fg: Color = "#E6D29E".try_into().unwrap();
+        let dot_bg: Color = "#336677".try_into().unwrap();
+        let load_bg: Color = "#957FB8".try_into().unwrap();
+        let exec_bg: Color = "#Bf616A".try_into().unwrap();
+        let comment: Color = "#624354".try_into().unwrap();
+        let constant: Color = "#FF9E3B".try_into().unwrap();
+        let function: Color = "#957FB8".try_into().unwrap();
+        let keyword: Color = "#Bf616A".try_into().unwrap();
+        let module: Color = "#2D4F67".try_into().unwrap();
+        let punctuation: Color = "#9CABCA".try_into().unwrap();
+        let string: Color = "#61DCA5".try_into().unwrap();
+        let type_: Color = "#7E9CD8".try_into().unwrap();
+        let variable: Color = "#DCA561".try_into().unwrap();
 
-fn parse_color(prop: &str, val: &str) -> Result<Color, String> {
-    Color::try_from(val)
-        .map_err(|_| format!("expected #RRGGBB string for '{prop}' but found '{val}'"))
-}
-
-fn try_parse_binding(input: &str) -> Result<(Vec<Input>, String), String> {
-    let (keys, prog) = input
-        .split_once("=>")
-        .ok_or_else(|| format!("'{input}' is not a 'map ... => prog' statement"))?;
-
-    let keys: Vec<Input> = keys
-        .split_whitespace()
-        .filter_map(|s| {
-            if s.len() == 1 {
-                let c = s.chars().next().unwrap();
-                if c.is_whitespace() {
-                    None
-                } else {
-                    Some(Input::Char(c))
-                }
-            } else {
-                match s {
-                    "<space>" => Some(Input::Char(' ')),
-                    _ => None,
-                }
-            }
-        })
+        #[rustfmt::skip]
+        let syntax = [
+            (TK_DEFAULT,    Styles { fg: Some(fg), bg: Some(bg), ..Default::default() }),
+            (TK_DOT,        Styles { fg: Some(fg), bg: Some(dot_bg), ..Default::default() }),
+            (TK_LOAD,       Styles { fg: Some(fg), bg: Some(load_bg), ..Default::default() }),
+            (TK_EXEC,       Styles { fg: Some(fg), bg: Some(exec_bg), ..Default::default() }),
+            ("character",   Styles { fg: Some(string), bold: true, ..Default::default() }),
+            ("comment",     Styles { fg: Some(comment), italic: true, ..Default::default() }),
+            ("constant",    Styles { fg: Some(constant), ..Default::default() }),
+            ("function",    Styles { fg: Some(function), ..Default::default() }),
+            ("keyword",     Styles { fg: Some(keyword), ..Default::default() }),
+            ("module",      Styles { fg: Some(module), ..Default::default() }),
+            ("punctuation", Styles { fg: Some(punctuation), ..Default::default() }),
+            ("string",      Styles { fg: Some(string), ..Default::default() }),
+            ("type",        Styles { fg: Some(type_), ..Default::default() }),
+            ("variable",    Styles { fg: Some(variable), ..Default::default() }),
+        ]
+        .map(|(s, v)| (s.to_string(), v))
+        .into_iter()
         .collect();
 
-    Ok((keys, prog.trim().to_string()))
+        Self {
+            bg,
+            fg,
+            bar_bg: "#4E415C".try_into().unwrap(),
+            signcol_fg: "#544863".try_into().unwrap(),
+            minibuffer_hl: "#3E3549".try_into().unwrap(),
+            syntax,
+        }
+    }
+}
+
+impl ColorScheme {
+    /// Determine UI [Style]s to be applied for a given syntax tag.
+    ///
+    /// If the full tag does not have associated styling but its dotted prefix does (e.g.
+    /// "function.macro" -> "function") then the styling of the prefix is used. Otherwise default
+    /// styling will be used ([TK_DEFAULT]).
+    pub fn styles_for(&self, tag: &str) -> &Styles {
+        match self.syntax.get(tag) {
+            Some(styles) => styles,
+            None => tag
+                .split_once('.')
+                .and_then(|(prefix, _)| self.syntax.get(prefix))
+                .or(self.syntax.get(TK_DEFAULT))
+                .expect("to have default styles"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TsConfig {
+    pub parser_dir: String,
+    pub syntax_query_dir: String,
+}
+
+impl Default for TsConfig {
+    fn default() -> Self {
+        let home = env::var("HOME").unwrap();
+
+        TsConfig {
+            parser_dir: format!("{home}/.ad/tree-sitter/parsers"),
+            syntax_query_dir: format!("{home}/.ad/tree-sitter/queries"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LangConfig {
+    pub name: String,
+    pub extensions: Vec<String>,
+    #[serde(default)]
+    pub first_lines: Vec<String>,
+    #[serde(default)]
+    pub lsp: Option<LspConfig>,
+}
+
+/// Configuration for running a given language server
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LspConfig {
+    /// The command to run to start the language server
+    pub command: String,
+    /// Additional arguments to pass to the language server command
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Files or directories to search for in order to determine the project root
+    pub roots: Vec<String>,
+}
+
+impl LspConfig {
+    pub fn root_for_buffer<'a>(&self, b: &'a Buffer) -> Option<&'a Path> {
+        let d = b.dir()?;
+        for root in self.roots.iter() {
+            if let Some(p) = parent_dir_containing(d, root) {
+                return Some(p);
+            }
+        }
+
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct KeyBindings {
+    #[serde(deserialize_with = "de_serde_trie")]
+    pub normal: Trie<Input, KeyAction>,
+}
+
+impl Default for KeyBindings {
+    fn default() -> Self {
+        KeyBindings {
+            normal: Trie::from_pairs(Vec::new()).unwrap(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum KeyAction {
+    External { run: String },
+}
+
+impl KeyAction {
+    pub fn as_actions(&self) -> Actions {
+        match self {
+            Self::External { run } => Actions::Single(Action::ExecuteString { s: run.clone() }),
+        }
+    }
+}
+
+pub fn de_serde_trie<'de, D>(deserializer: D) -> Result<Trie<Input, KeyAction>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw_map: HashMap<String, KeyAction> = Deserialize::deserialize(deserializer)?;
+    let mut raw = Vec::with_capacity(raw_map.len());
+
+    for (k, action) in raw_map.into_iter() {
+        let keys: Vec<Input> = k
+            .split_whitespace()
+            .filter_map(|s| {
+                if s.len() == 1 {
+                    let c = s.chars().next().unwrap();
+                    if c.is_whitespace() {
+                        None
+                    } else {
+                        Some(Input::Char(c))
+                    }
+                } else {
+                    match s {
+                        "<space>" => Some(Input::Char(' ')),
+                        _ => None,
+                    }
+                }
+            })
+            .collect();
+
+        raw.push((keys, action));
+    }
+
+    // Make sure that none of the user provided bindings clash with Normal mode
+    // bindings as that will mean they never get run
+    let nm = normal_mode();
+    for (keys, _) in raw.iter() {
+        if nm.keymap.contains_key_or_prefix(keys) {
+            let mut s = String::new();
+            for k in keys {
+                if let Input::Char(c) = k {
+                    s.push(*c);
+                }
+            }
+
+            return Err(de::Error::custom(format!(
+                "mapping '{s}' collides with a Normal mode mapping"
+            )));
+        }
+    }
+
+    Trie::from_pairs(raw).map_err(de::Error::custom)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const EXAMPLE_CONFIG: &str = include_str!("../data/init.conf");
-    const CUSTOM_CONFIG: &str = "
-# This is a comment
-
-
-# Blank lines should be skipped
-set tabstop=7
-
-set expand-tab=false
-set match-indent=false
-
-map G G => my-prog
-";
-
-    // This should be our default so we are just verifying that we have not diverged from
-    // what is in the repo.
     #[test]
-    fn parse_of_example_config_works() {
-        let cfg = Config::parse(EXAMPLE_CONFIG).unwrap();
-        let bindings = Trie::from_pairs(vec![
-            (vec![Input::Char(' '), Input::Char('F')], "fmt".to_string()),
-            (vec![Input::Char('>')], "indent".to_string()),
-            (vec![Input::Char('<')], "unindent".to_string()),
-        ])
-        .unwrap();
-
-        let expected = Config {
-            bindings,
-            ..Default::default()
-        };
-
-        assert_eq!(cfg, expected);
-    }
-
-    #[test]
-    fn custom_vals_work() {
-        let cfg = Config::parse(CUSTOM_CONFIG).unwrap();
-
-        let expected = Config {
-            tabstop: 7,
-            expand_tab: false,
-            match_indent: false,
-            bindings: Trie::from_pairs(vec![(
-                vec![Input::Char('G'), Input::Char('G')],
-                "my-prog".to_string(),
-            )])
-            .unwrap(),
-            ..Default::default()
-        };
-
-        assert_eq!(cfg, expected);
+    fn default_loads() {
+        Config::default(); // will panic if default config is invalid
     }
 }

@@ -16,7 +16,7 @@ mod range;
 mod text_object;
 
 pub(crate) use cur::Cur;
-pub(crate) use range::{LineRange, Range};
+pub(crate) use range::Range;
 pub(crate) use text_object::TextObject;
 
 /// A Dot represents the currently selected contents of a Buffer.
@@ -206,13 +206,6 @@ impl Dot {
     pub fn flip(&mut self) {
         if let Dot::Range { r } = self {
             r.flip();
-        }
-    }
-
-    pub(crate) fn line_range(&self, y: usize, b: &Buffer) -> Option<LineRange> {
-        match self {
-            Dot::Cur { .. } => None,
-            Dot::Range { r } => r.line_range(y, b),
         }
     }
 

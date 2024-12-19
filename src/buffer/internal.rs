@@ -255,6 +255,22 @@ impl GapBuffer {
         self.n_chars
     }
 
+    pub fn byte_line_endings(&self) -> Vec<usize> {
+        let mut endings: Vec<_> = self
+            .line_endings
+            .keys()
+            .map(|i| self.raw_byte_to_byte(*i))
+            .collect();
+        let eob = self.len();
+
+        match endings.last() {
+            Some(&idx) if idx == eob => (),
+            _ => endings.push(eob),
+        }
+
+        endings
+    }
+
     /// Clear the contents of the buffer.
     ///
     /// # Note
@@ -354,6 +370,30 @@ impl GapBuffer {
         };
 
         chars_to - chars_from
+    }
+
+    /// Primarily intended for supplying contiguous ranges of bytes to tree-sitter when
+    /// parsing. Returns a byte slice from the underlying data buffer without entering
+    /// the gap.
+    pub fn maximal_slice_from_offset(&self, byte_offset: usize) -> &[u8] {
+        if byte_offset > self.len() {
+            &[]
+        } else {
+            let i = self.byte_to_raw_byte(byte_offset);
+            match i.cmp(&self.gap_start) {
+                Ordering::Less => &self.data[i..self.gap_start],
+                Ordering::Equal => &self.data[self.gap_end..],
+                Ordering::Greater => &self.data[i..],
+            }
+        }
+    }
+
+    /// An exclusive range of characters from the buffer
+    pub fn slice_from_byte_offsets(&self, byte_from: usize, byte_to: usize) -> Slice<'_> {
+        let from = self.byte_to_raw_byte(byte_from);
+        let to = self.byte_to_raw_byte(byte_to);
+
+        Slice::from_raw_offsets(from, to, self)
     }
 
     /// An exclusive range of characters from the buffer
@@ -699,6 +739,15 @@ impl GapBuffer {
     }
 
     #[inline]
+    fn byte_to_raw_byte(&self, byte: usize) -> usize {
+        if byte > self.gap_start {
+            byte + self.gap()
+        } else {
+            byte
+        }
+    }
+
+    #[inline]
     fn offset_char_to_byte(
         &self,
         char_idx: usize,
@@ -791,6 +840,18 @@ impl<'a> Slice<'a> {
         }
     }
 
+    /// The byte offset that this slice starts at within the parent [GapBuffer].
+    pub fn from_byte(&self) -> usize {
+        self.from
+    }
+
+    /// The number of utf-8 characters within this slice.
+    ///
+    /// Calculating involves parsing the entire slice as utf-8.
+    pub fn len_utf8(&self) -> usize {
+        self.chars().count()
+    }
+
     /// The two sides of this slice as &str references
     pub fn as_strs(&self) -> (&str, &str) {
         // SAFETY: we know that we have valid utf8 data internally
@@ -799,6 +860,14 @@ impl<'a> Slice<'a> {
                 std::str::from_utf8_unchecked(self.left),
                 std::str::from_utf8_unchecked(self.right),
             )
+        }
+    }
+
+    /// Iterate over the contiguous &[u8] regions within this slice
+    pub fn slice_iter(self) -> SliceIter<'a> {
+        SliceIter {
+            inner: self,
+            pos: Some(false),
         }
     }
 
@@ -862,6 +931,30 @@ impl PartialEq<String> for Slice<'_> {
     }
 }
 
+#[derive(Debug)]
+pub struct SliceIter<'a> {
+    inner: Slice<'a>,
+    pos: Option<bool>,
+}
+
+impl<'a> Iterator for SliceIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.pos? {
+            false => {
+                self.pos = Some(true);
+                Some(self.inner.left)
+            }
+
+            true => {
+                self.pos = None;
+                Some(self.inner.right)
+            }
+        }
+    }
+}
+
 /// An iterator of characters from a [Slice]
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Chars<'a> {
@@ -882,6 +975,7 @@ impl Iterator for Chars<'_> {
         let ch = unsafe { decode_char_at(cur, data) };
         let len = ch.len_utf8();
         self.cur += len;
+
         Some(ch)
     }
 }

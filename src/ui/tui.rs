@@ -1,28 +1,27 @@
 //! A terminal UI for ad
 use crate::{
-    buffer::Buffer,
+    buffer::{Buffer, GapBuffer, Slice},
     config::ColorScheme,
     config_handle, die,
-    dot::{LineRange, Range},
+    dot::Range,
     editor::{Click, MiniBufferState},
     input::Event,
     key::{Input, MouseButton, MouseEvent},
     restore_terminal_state,
     term::{
         clear_screen, enable_alternate_screen, enable_mouse_support, enable_raw_mode, get_termios,
-        get_termsize, register_signal_handler, win_size_changed, CurShape,
+        get_termsize, register_signal_handler, win_size_changed, CurShape, Cursor, Style, Styles,
     },
-    term::{Cursor, Style},
+    ts::{LineIter, TokenIter},
     ui::{
-        layout::{Column, View, Window},
-        lex::{Token, TokenType, Tokens},
+        layout::{Column, Window},
         Layout, StateChange, UserInterface,
     },
     ziplist, ORIGINAL_TERMIOS, VERSION,
 };
 use std::{
     char,
-    cmp::min,
+    cmp::{min, Ordering},
     io::{stdin, stdout, Read, Stdin, Stdout, Write},
     panic,
     sync::mpsc::Sender,
@@ -187,33 +186,51 @@ impl Tui {
         buf
     }
 
-    fn render_minibuffer_state(&self, mb: &MiniBufferState<'_>, cs: &ColorScheme) -> Vec<String> {
+    fn render_minibuffer_state(
+        &self,
+        mb: &MiniBufferState<'_>,
+        tabstop: usize,
+        cs: &ColorScheme,
+    ) -> Vec<String> {
         let mut lines = Vec::new();
 
         if let Some(b) = mb.b {
-            let width = self.screen_cols;
-
             for i in mb.top..=mb.bottom {
-                let (rline, _) =
-                    raw_rline_unchecked(b, &View::new(0), i, 0, self.screen_cols, None);
-                let len = min(self.screen_cols, rline.len());
-                if i == mb.selected_line_idx {
-                    lines.push(format!(
-                        "{}{}{:<width$}{}\r\n",
-                        Style::Fg(cs.fg),
-                        Style::Bg(cs.minibuffer_hl),
-                        &rline[0..len],
-                        Style::Reset,
-                    ));
+                let slice = b.line(i).unwrap();
+                let bg = if i == mb.selected_line_idx {
+                    cs.minibuffer_hl
                 } else {
-                    lines.push(format!(
-                        "{}{}{}{}\r\n",
-                        Style::Fg(cs.fg),
-                        Style::Bg(cs.bg),
-                        &rline[0..len],
-                        Cursor::ClearRight
-                    ));
+                    cs.bg
+                };
+                let styles = Styles {
+                    fg: Some(cs.fg),
+                    bg: Some(bg),
+                    ..Default::default()
+                };
+
+                let mut rline = String::new();
+                let mut cols = 0;
+                render_slice(
+                    slice,
+                    &styles,
+                    self.screen_cols,
+                    tabstop,
+                    &mut 0,
+                    &mut cols,
+                    &mut rline,
+                );
+
+                if i == mb.selected_line_idx && cols < self.screen_cols {
+                    rline.push_str(&Style::Bg(cs.minibuffer_hl).to_string());
                 }
+
+                let len = min(self.screen_cols, rline.len());
+                let width = self.screen_cols;
+                lines.push(format!(
+                    "{:<width$}{}\r\n",
+                    &rline[0..len],
+                    Cursor::ClearRight
+                ));
             }
         }
 
@@ -300,10 +317,8 @@ impl UserInterface for Tui {
         // show the status bar as the final two lines of the UI.
         let effective_screen_rows = self.screen_rows - (mb.bottom - mb.top) - mb_offset;
 
-        let (cs, status_timeout) = {
-            let conf = config_handle!();
-            (conf.colorscheme, conf.status_timeout)
-        };
+        let conf = config_handle!();
+        let (cs, status_timeout, tabstop) = (&conf.colorscheme, conf.status_timeout, conf.tabstop);
 
         let load_exec_range = match held_click {
             Some(click) if click.btn == MouseButton::Right || click.btn == MouseButton::Middle => {
@@ -317,23 +332,24 @@ impl UserInterface for Tui {
         lines.push(format!("{}{}", Cursor::Hide, Cursor::ToStart));
 
         if layout.is_empty_scratch() {
-            lines.append(&mut self.render_banner(effective_screen_rows, &cs));
+            lines.append(&mut self.render_banner(effective_screen_rows, cs));
         } else {
             lines.extend(WinsIter::new(
                 layout,
                 load_exec_range,
                 effective_screen_rows,
+                tabstop,
                 self,
-                &cs,
+                cs,
             ));
         }
 
-        lines.push(self.render_status_bar(&cs, mode_name, active_buffer));
+        lines.push(self.render_status_bar(cs, mode_name, active_buffer));
 
         if w_minibuffer {
-            lines.append(&mut self.render_minibuffer_state(&mb, &cs));
+            lines.append(&mut self.render_minibuffer_state(&mb, tabstop, cs));
         } else {
-            lines.push(self.render_message_bar(&cs, pending_keys, status_timeout));
+            lines.push(self.render_message_bar(cs, pending_keys, status_timeout));
         }
 
         // Position the cursor
@@ -377,6 +393,7 @@ impl<'a> WinsIter<'a> {
         layout: &'a Layout,
         load_exec_range: Option<(bool, Range)>,
         screen_rows: usize,
+        tabstop: usize,
         tui: &'a Tui,
         cs: &'a ColorScheme,
     ) -> Self {
@@ -385,7 +402,7 @@ impl<'a> WinsIter<'a> {
             .iter()
             .map(|(is_focus, col)| {
                 let rng = if is_focus { load_exec_range } else { None };
-                ColIter::new(col, layout, rng, screen_rows, cs)
+                ColIter::new(col, layout, rng, screen_rows, tabstop, cs)
             })
             .collect();
         let buf = Vec::with_capacity(col_iters.len());
@@ -427,6 +444,7 @@ struct ColIter<'a> {
     cs: &'a ColorScheme,
     load_exec_range: Option<(bool, Range)>,
     screen_rows: usize,
+    tabstop: usize,
     n_cols: usize,
     yielded: usize,
 }
@@ -437,6 +455,7 @@ impl<'a> ColIter<'a> {
         layout: &'a Layout,
         load_exec_range: Option<(bool, Range)>,
         screen_rows: usize,
+        tabstop: usize,
         cs: &'a ColorScheme,
     ) -> Self {
         ColIter {
@@ -446,6 +465,7 @@ impl<'a> ColIter<'a> {
             cs,
             load_exec_range,
             screen_rows,
+            tabstop,
             n_cols: col.n_cols,
             yielded: 0,
         }
@@ -462,15 +482,17 @@ impl<'a> ColIter<'a> {
 
         let (w_lnum, _) = b.sign_col_dims();
         let rng = if is_focus { self.load_exec_range } else { None };
+        let it = b.iter_tokenized_lines_from(w.view.row_off, rng);
 
         Some(WinIter {
             y: 0,
             w_lnum,
             n_cols: self.n_cols,
-            b,
+            tabstop: self.tabstop,
+            it,
+            gb: &b.txt,
             w,
             cs: self.cs,
-            load_exec_range: rng,
         })
     }
 }
@@ -503,10 +525,11 @@ struct WinIter<'a> {
     y: usize,
     w_lnum: usize,
     n_cols: usize,
-    b: &'a Buffer,
+    tabstop: usize,
+    it: LineIter<'a>,
+    gb: &'a GapBuffer,
     w: &'a Window,
     cs: &'a ColorScheme,
-    load_exec_range: Option<(bool, Range)>,
 }
 
 impl Iterator for WinIter<'_> {
@@ -519,39 +542,43 @@ impl Iterator for WinIter<'_> {
         let file_row = self.y + self.w.view.row_off;
         self.y += 1;
 
-        let line = if file_row >= self.b.len_lines() {
-            let mut buf = format!(
-                "{}{}~ {VLINE:>width$}{}",
-                Style::Fg(self.cs.signcol_fg),
-                Style::Bg(self.cs.bg),
-                Style::Fg(self.cs.fg),
-                width = self.w_lnum
-            );
-            let padding = self.n_cols - self.w_lnum - 2;
-            buf.push_str(&" ".repeat(padding));
+        let next = self.it.next();
 
-            buf
-        } else {
-            // +2 for the leading space and vline chars
-            let padding = self.w_lnum + 2;
+        let line = match next {
+            None => {
+                let mut buf = format!(
+                    "{}{}~ {VLINE:>width$}{}",
+                    Style::Fg(self.cs.signcol_fg),
+                    Style::Bg(self.cs.bg),
+                    Style::Fg(self.cs.fg),
+                    width = self.w_lnum
+                );
+                let padding = self.n_cols - self.w_lnum - 2;
+                buf.push_str(&" ".repeat(padding));
 
-            format!(
-                "{}{} {:>width$}{VLINE}{}{}",
-                Style::Fg(self.cs.signcol_fg),
-                Style::Bg(self.cs.bg),
-                file_row + 1,
-                Style::Fg(self.cs.fg),
-                styled_rline_unchecked(
-                    self.b,
-                    &self.w.view,
-                    file_row,
-                    padding,
-                    self.n_cols,
-                    self.load_exec_range,
-                    self.cs
-                ),
-                width = self.w_lnum
-            )
+                buf
+            }
+
+            Some(it) => {
+                // +2 for the leading space and vline chars
+                let padding = self.w_lnum + 2;
+
+                format!(
+                    "{}{} {:>width$}{VLINE}{}",
+                    Style::Fg(self.cs.signcol_fg),
+                    Style::Bg(self.cs.bg),
+                    file_row + 1,
+                    render_line(
+                        self.gb,
+                        it,
+                        self.w.view.col_off,
+                        self.n_cols - padding,
+                        self.tabstop,
+                        self.cs
+                    ),
+                    width = self.w_lnum
+                )
+            }
         };
 
         Some(line)
@@ -591,158 +618,109 @@ fn render_pending(keys: &[Input]) -> String {
     s
 }
 
-fn num_cols(chars: &[char]) -> usize {
-    chars
-        .iter()
-        .map(|c| UnicodeWidthChar::width(*c).unwrap_or(1))
-        .sum()
-}
+#[inline]
+fn render_slice(
+    slice: Slice<'_>,
+    styles: &Styles,
+    max_cols: usize,
+    tabstop: usize,
+    to_skip: &mut usize,
+    cols: &mut usize,
+    buf: &mut String,
+) {
+    let mut chars = slice.chars().peekable();
+    let mut spaces = None;
 
-/// The render representation of a given line, truncated to fit within the
-/// available screen space.
-/// This includes tab expansion but not any styling that might be applied,
-/// trailing \r\n or screen clearing escape codes.
-/// If a dot range is provided then the character offsets used will be adjusted
-/// to account for expanded tab characters, returning None if self.col_off would
-/// mean that the requested range is not currently visible.
-fn raw_rline_unchecked(
-    b: &Buffer,
-    view: &View,
-    y: usize,
-    lpad: usize,
-    screen_cols: usize,
-    dot_range: Option<(usize, usize)>,
-) -> (String, Option<(usize, usize)>) {
-    let max_cols = screen_cols - lpad;
-    let tabstop = config_handle!().tabstop;
-    let mut rline = Vec::with_capacity(max_cols);
-    // Iterating over characters not bytes as we need to account for multi-byte utf8
-    let line = b.txt.line(y);
-    let mut it = line.chars().skip(view.col_off);
+    if *to_skip > 0 {
+        for ch in chars.by_ref() {
+            let w = if ch == '\t' {
+                tabstop
+            } else {
+                UnicodeWidthChar::width(ch).unwrap_or(1)
+            };
 
-    let mut update_dot = dot_range.is_some();
-    let (mut start, mut end) = dot_range.unwrap_or_default();
-
-    if update_dot && view.col_off > end {
-        update_dot = false; // we're past the requested range
-    } else {
-        start = start.saturating_sub(view.col_off);
-        end = end.saturating_sub(view.col_off);
-    }
-
-    let mut rline_cols = 0;
-
-    while rline_cols <= max_cols {
-        match it.next() {
-            Some('\n') | None => break,
-            Some('\t') => {
-                if rline.len() < start {
-                    start += tabstop - 1;
+            match (*to_skip).cmp(&w) {
+                Ordering::Less => {
+                    spaces = Some(w - *to_skip);
+                    break;
                 }
-                if rline.len() < end {
-                    end = end.saturating_add(tabstop - 1);
-                }
-                rline.append(&mut [' '].repeat(tabstop));
-            }
-            Some(c) => rline.push(c),
-        }
-
-        rline_cols = num_cols(&rline);
-    }
-
-    // We need to check for overflowing both from tab expansion and variable width
-    // unicode characters at the end of the line. After trimming the line to ensure
-    // we are under the column limit we may end up short so we unconditionally
-    // do the padding check after this.
-    if rline_cols >= max_cols {
-        while rline_cols > max_cols {
-            match rline.pop() {
-                Some(c) => rline_cols -= UnicodeWidthChar::width(c).unwrap_or(1),
-                None => break,
+                Ordering::Equal => break,
+                Ordering::Greater => *to_skip -= w,
             }
         }
     }
 
-    let n_chars = rline.len();
-
-    // Pad to max_cols so that columns render correctly next to one another
-    let padding = max_cols - rline_cols;
-    rline.append(&mut [' '].repeat(padding));
-    let s = rline.into_iter().collect();
-
-    if update_dot {
-        start = min(start, n_chars);
-        end = min(end, n_chars);
-        (s, Some((start, end)))
-    } else {
-        (s, None)
+    if let Some(fg) = styles.fg {
+        buf.push_str(&Style::Fg(fg).to_string());
     }
+    if let Some(bg) = styles.bg {
+        buf.push_str(&Style::Bg(bg).to_string());
+    }
+    if styles.bold {
+        buf.push_str(&Style::Bold.to_string());
+    }
+    if styles.italic {
+        buf.push_str(&Style::Italic.to_string());
+    }
+    if styles.underline {
+        buf.push_str(&Style::Underline.to_string());
+    }
+
+    if let Some(n) = spaces {
+        buf.extend(std::iter::repeat_n(' ', n));
+        *cols = n;
+    }
+
+    for ch in chars {
+        if ch == '\n' {
+            break;
+        }
+        let w = if ch == '\t' {
+            tabstop
+        } else {
+            UnicodeWidthChar::width(ch).unwrap_or(1)
+        };
+
+        if *cols + w <= max_cols {
+            buf.push(ch);
+            *cols += w;
+        } else {
+            break;
+        }
+    }
+
+    buf.push_str(&Style::Reset.to_string());
 }
 
-/// The render representation of a given line, truncated to fit within the
-/// available screen space.
-/// This includes tab expansion and any styling that might be applied but not
-/// trailing \r\n or screen clearing escape codes.
-fn styled_rline_unchecked(
-    b: &Buffer,
-    view: &View,
-    y: usize,
-    lpad: usize,
-    screen_cols: usize,
-    load_exec_range: Option<(bool, Range)>,
+fn render_line(
+    gb: &GapBuffer,
+    it: TokenIter<'_>,
+    col_off: usize,
+    max_cols: usize,
+    tabstop: usize,
     cs: &ColorScheme,
 ) -> String {
-    let map_line_range = |lr| match lr {
-        // LineRange is an inclusive range so we need to insert after `end` if its
-        // not the end of the line
-        LineRange::Partial { start, end, .. } => (start, end + 1),
-        LineRange::FromStart { end, .. } => (0, end + 1),
-        LineRange::ToEnd { start, .. } => (start, usize::MAX),
-        LineRange::Full { .. } => (0, usize::MAX),
-    };
-
-    let dot_range = b.dot.line_range(y, b).map(map_line_range);
-    let (rline, dot_range) = raw_rline_unchecked(b, view, y, lpad, screen_cols, dot_range);
-    let rline = rline.replace("\x1b", char::REPLACEMENT_CHARACTER.to_string().as_str());
-
-    let raw_tks = Tokens::Single(Token {
-        ty: TokenType::Default,
-        s: &rline,
-    });
-
-    let mut tks = match dot_range {
-        Some((start, end)) => raw_tks.with_highlighted_dot(start, end, TokenType::Dot),
-        None => match raw_tks {
-            Tokens::Single(tk) => vec![tk],
-            Tokens::Multi(tks) => tks,
-        },
-    };
-
-    match load_exec_range {
-        Some((is_load, rng)) if !b.dot.contains_range(&rng) => {
-            if let Some(lr) = rng.line_range(y, b).map(map_line_range) {
-                if let (_, Some((start, end))) =
-                    raw_rline_unchecked(b, view, y, lpad, screen_cols, Some(lr))
-                {
-                    let ty = if is_load {
-                        TokenType::Load
-                    } else {
-                        TokenType::Execute
-                    };
-                    tks = Tokens::Multi(tks).with_highlighted_dot(start, end, ty);
-                }
-            }
-        }
-
-        _ => (),
-    }
-
     let mut buf = String::new();
-    for tk in tks.into_iter() {
-        buf.push_str(&tk.render(cs));
+    let mut to_skip = col_off;
+    let mut cols = 0;
+
+    for tk in it {
+        let styles = cs.styles_for(tk.tag());
+        let slice = tk.as_slice(gb);
+        render_slice(
+            slice,
+            styles,
+            max_cols,
+            tabstop,
+            &mut to_skip,
+            &mut cols,
+            &mut buf,
+        );
     }
 
-    buf.push_str(&Style::Bg(cs.bg).to_string());
+    if cols < max_cols {
+        buf.extend(std::iter::repeat_n(' ', max_cols - cols));
+    }
 
     buf
 }
@@ -824,36 +802,4 @@ fn try_read_input(stdin: &mut Stdin) -> Option<Input> {
     }
 
     Some(Input::Esc)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use simple_test_case::test_case;
-
-    #[test_case("simple line", None, 0, "simple line       ", None; "simple line no dot")]
-    #[test_case("simple line", Some((1, 5)), 0, "simple line       ", Some((1, 5)); "simple line partial")]
-    #[test_case("simple line", Some((0, usize::MAX)), 0, "simple line       ", Some((0, 11)); "simple line full")]
-    #[test_case("simple line", Some((0, 2)), 4, "le line           ", None; "scrolled past dot")]
-    #[test_case("simple line", Some((0, 9)), 4, "le line           ", Some((0, 5)); "scrolled updating dot")]
-    #[test_case("\twith tabs", Some((3, usize::MAX)), 0, "    with tabs     ", Some((6, 13)); "with tabs")]
-    #[test_case("\twith tabs", Some((0, usize::MAX)), 0, "    with tabs     ", Some((0, 13)); "with tabs full")]
-    #[test_case("\t\twith tabs", Some((4, usize::MAX)), 0, "        with tabs ", Some((10, 17)); "with multiple tabs")]
-    #[test]
-    fn raw_line_unchecked_updates_dot_correctly(
-        line: &str,
-        dot_range: Option<(usize, usize)>,
-        col_off: usize,
-        expected_line: &str,
-        expected_dot_range: Option<(usize, usize)>,
-    ) {
-        let b = Buffer::new_unnamed(0, line);
-        let mut view = View::new(0);
-        view.col_off = col_off;
-
-        let (line, dot_range) = raw_rline_unchecked(&b, &view, 0, 0, 18, dot_range);
-
-        assert_eq!(dot_range, expected_dot_range);
-        assert_eq!(line, expected_line);
-    }
 }

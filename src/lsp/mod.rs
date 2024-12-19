@@ -4,13 +4,13 @@
 //!   https://microsoft.github.io/language-server-protocol/specification
 use crate::{
     buffer::{Buffer, Buffers},
-    die,
+    config::{LangConfig, LspConfig},
+    config_handle, die,
     editor::{Action, Actions, MbSelect, MbSelector, MiniBufferSelection, ViewPort},
     input::Event,
     lsp::{
         capabilities::{Capabilities, PositionEncoding},
         client::{LspClient, LspMessage},
-        lang::{built_in_configs, LspConfig},
         messages::{LspNotification, LspRequest, NotificationHandler, RequestHandler},
         rpc::{Message, Notification, Request, RequestId, Response},
     },
@@ -29,7 +29,6 @@ use tracing::{debug, error, warn};
 
 mod capabilities;
 mod client;
-mod lang;
 mod messages;
 mod rpc;
 
@@ -58,7 +57,7 @@ pub struct LspManagerHandle {
     tx_req: Sender<Req>,
     capabilities: ReadOnlyLock<HashMap<String, (usize, Capabilities)>>,
     diagnostics: ReadOnlyLock<HashMap<Uri, Vec<Diagnostic>>>,
-    configs: Vec<LspConfig>,
+    configs: Vec<LangConfig>,
 }
 
 impl LspManagerHandle {
@@ -83,34 +82,34 @@ impl LspManagerHandle {
     /// Will return None if there is no active client with recorded capabilities for the
     /// given language.
     fn lsp_id_and_encoding_for(&self, b: &Buffer) -> Option<(usize, PositionEncoding)> {
-        let lang = &self.config_for_buffer(b)?.lang;
+        let (lang, _) = &self.config_for_buffer(b)?;
 
         self.capabilities
             .read()
             .unwrap()
-            .get(lang)
+            .get(lang.as_str())
             .map(|(id, caps)| (*id, caps.position_encoding))
     }
 
-    fn config_for_buffer(&self, b: &Buffer) -> Option<&LspConfig> {
+    fn config_for_buffer(&self, b: &Buffer) -> Option<(&String, &LspConfig)> {
         let os_ext = b.path()?.extension()?;
         let ext = os_ext.to_str()?;
         self.configs
             .iter()
             .find(|c| c.extensions.iter().any(|e| e == ext))
+            .and_then(|c| c.lsp.as_ref().map(|lsp| (&c.name, lsp)))
     }
 
     fn start_req_for_buf(&self, bs: &Buffers) -> Option<Req> {
         let b = bs.active();
-        let config = self.config_for_buffer(b)?;
+        let (lang, config) = self.config_for_buffer(b)?;
         let root = config.root_for_buffer(b)?.to_str()?.to_owned();
-        let lang = &config.lang;
         let open_bufs: Vec<_> = bs
             .iter()
             .flat_map(|b| match self.config_for_buffer(b) {
-                Some(config) if &config.lang == lang => Some(PendingParams::DocumentOpen {
-                    lang: lang.clone(),
-                    path: b.full_name().to_string(),
+                Some((blang, _)) if blang == lang => Some(PendingParams::DocumentOpen {
+                    lang: lang.to_owned(),
+                    path: b.full_name().to_owned(),
                     content: b.str_contents(),
                 }),
                 _ => None,
@@ -118,8 +117,8 @@ impl LspManagerHandle {
             .collect();
 
         Some(Req::Start {
-            lang: config.lang.clone(),
-            cmd: config.cmd.clone(),
+            lang: lang.to_owned(),
+            cmd: config.command.clone(),
             args: config.args.clone(),
             root,
             open_bufs,
@@ -150,12 +149,12 @@ impl LspManagerHandle {
     }
 
     pub fn show_server_capabilities(&self, b: &Buffer) -> Option<(&'static str, String)> {
-        let lang = &self.config_for_buffer(b)?.lang;
+        let (lang, _) = &self.config_for_buffer(b)?;
         let txt = self
             .capabilities
             .read()
             .unwrap()
-            .get(lang)?
+            .get(lang.as_str())?
             .1
             .as_pretty_json()?;
 
@@ -174,7 +173,7 @@ impl LspManagerHandle {
 
     pub fn document_opened(&self, b: &Buffer) {
         let lang = match self.config_for_buffer(b) {
-            Some(config) => config.lang.clone(),
+            Some((lang, _)) => lang.clone(),
             None => return,
         };
 
@@ -308,7 +307,7 @@ impl LspManager {
             tx_req,
             capabilities,
             diagnostics,
-            configs: built_in_configs(),
+            configs: config_handle!().languages.clone(),
         }
     }
 

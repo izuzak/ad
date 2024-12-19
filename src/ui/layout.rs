@@ -50,6 +50,10 @@ impl Layout {
         &self.buffers
     }
 
+    pub(crate) fn buffers_mut(&mut self) -> &mut Buffers {
+        &mut self.buffers
+    }
+
     pub(crate) fn ensure_file_is_open(&mut self, path: &str) {
         self.buffers.ensure_file_is_open(path)
     }

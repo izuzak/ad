@@ -54,16 +54,17 @@ where
         })
     }
 
-    pub(crate) fn extend_from_pairs(
-        &mut self,
-        pairs: Vec<(Vec<K>, V)>,
-    ) -> Result<(), &'static str> {
-        for (k, v) in pairs.into_iter() {
-            insert(k, v, &mut self.roots)?;
-        }
-
-        Ok(())
-    }
+    // TODO: re-use this when dynamic config updates are supported
+    // pub(crate) fn extend_from_pairs(
+    //     &mut self,
+    //     pairs: Vec<(Vec<K>, V)>,
+    // ) -> Result<(), &'static str> {
+    //     for (k, v) in pairs.into_iter() {
+    //         insert(k, v, &mut self.roots)?;
+    //     }
+    //
+    //     Ok(())
+    // }
 
     /// Set the default handler for unmatched single element keys
     pub fn set_default(&mut self, default: DefaultMapping<K, V>) {
