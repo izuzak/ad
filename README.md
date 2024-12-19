@@ -11,14 +11,18 @@ features and currently is not at all optimised or feature complete enough for us
 text editor.
 
 That said, if this sounds like something you might find interesting then please to take a
-look and see what you think! For now there isn't a whole lot of user facing documentation so
-you will need to read through the source code to learn about what is and is not implemented.
+look and see what you think! For now there isn't a whole lot of user facing documentation other
+than the built in `:help` section, so you will need to read through the source code and GitHub
+issues to learn about what is and is not implemented.
+
+
+![screenshot](https://raw.githubusercontent.com/sminez/ad/develop/screenshot.png)
 
 
 ## Project Status
 
-`ad` is stable enough and feature complete enough that you can try it out and see what you
-think. That said, there is currently very little documentation and there are likely to be
+`ad` is stable _enough_ and and supports sufficient features that you can try it out and see what
+you think. That said, there is currently very little documentation and there are likely to be
 a variety of bugs and crashes in places that I've not managed to fully track down yet. If
 you do try it out and spot something that is broken, please raise an issue on GitHub so I
 can look into it.
@@ -26,7 +30,32 @@ can look into it.
 You have been warned!
 
 
-[![tour](https://img.youtube.com/vi/jb2pAi5hLUg/0.jpg)](https://www.youtube.com/watch?v=jb2pAi5hLUg)
+### Contributing
+
+The project as a whole isn't particularly well suited for external contributors in its current
+state so please do [raise an issue](https://github.com/sminez/ad/issues/new/choose) to discuss
+any proposed changes or feature requests first rather than directly opening PRs. Outside of
+minor bug fixes and typo corrections I am unlikely to be able to do anything other than close
+PRs that have been opened without prior discussion of the issue they are intending to address.
+
+
+## Getting started
+
+Packaging of the project to include the default config files and helper scripts isn't currently
+in place, so the recommended way to try out `ad` is to clone this repo and compile from source:
+
+```bash
+$ git clone git@github.com:sminez/ad.git
+$ cd ad
+$ cargo install --path .
+$ make setup-dotfiles
+```
+
+From there you should be able to open `ad` and run the `:help` command to view the built-in help.
+If you would like to watch a tour of how `ad` works there is one available [here](https://www.youtube.com/watch?v=jb2pAi5hLUg).
+
+> Please be aware that given the early stage of the project and frequent changes to the codebase,
+> the exact content of the video tour may not accurately reflect the current state of `ad`.
 
 
 ## The design of ad
