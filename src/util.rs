@@ -1,5 +1,5 @@
 //! Utility functions
-use crate::editor::built_in_commands;
+use crate::{config::config_path, editor::built_in_commands};
 use std::{
     iter::Peekable,
     path::Path,
@@ -30,7 +30,9 @@ impl<T> ReadOnlyLock<T> {
 pub(crate) fn gen_help_docs() -> String {
     let help_template = include_str!("../data/help-template.txt");
 
-    help_template.replace("{{BUILT_IN_COMMANDS}}", &commands_section())
+    help_template
+        .replace("{{BUILT_IN_COMMANDS}}", &commands_section())
+        .replace("{{CONFIG_PATH}}", &config_path())
 }
 
 fn commands_section() -> String {

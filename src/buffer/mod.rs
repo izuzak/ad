@@ -423,6 +423,12 @@ impl Buffer {
             .collect()
     }
 
+    pub fn update_ts_state(&mut self) {
+        if let Some(ts) = self.ts_state.as_mut() {
+            ts.update(&self.txt);
+        }
+    }
+
     pub fn iter_tokenized_lines_from(
         &self,
         line: usize,
@@ -950,8 +956,9 @@ impl Buffer {
         self.edit_log.insert_char(cur, ch);
 
         if let Some(ts) = self.ts_state.as_mut() {
+            let idx = dot.first_cur().idx;
             let ch_old_end = match deleted.as_ref() {
-                Some(s) => idx + s.len(),
+                Some(s) => idx + s.chars().count(),
                 None => idx,
             };
             ts.edit(idx, ch_old_end, idx + 1, &self.txt);
@@ -969,6 +976,7 @@ impl Buffer {
         source: Option<Source>,
     ) -> (Cur, Option<String>) {
         let s = normalize_line_endings(s);
+        let len = s.chars().count();
         let (mut cur, deleted) = match dot {
             Dot::Cur { c } => (c, None),
             Dot::Range { r } => self.delete_range(r, source),
@@ -980,7 +988,6 @@ impl Buffer {
         // a no-op for the content of self.txt) but we support it as inserting
         // an empty string while dot is a range has the same effect as a delete.
         if !s.is_empty() {
-            let len = s.chars().count();
             self.txt.insert_str(idx, &s);
 
             if let (Some(source), Some(f)) = (source, self.input_filter.as_ref()) {
@@ -992,11 +999,12 @@ impl Buffer {
         }
 
         if let Some(ts) = self.ts_state.as_mut() {
+            let idx = dot.first_cur().idx;
             let ch_old_end = match deleted.as_ref() {
                 Some(s) => idx + s.chars().count(),
                 None => idx,
             };
-            ts.edit(idx, ch_old_end, cur.idx, &self.txt);
+            ts.edit(idx, ch_old_end, idx + len, &self.txt);
         }
 
         self.mark_dirty();
@@ -1011,7 +1019,8 @@ impl Buffer {
         };
 
         if let Some(ts) = self.ts_state.as_mut() {
-            let ch_old_end = min(dot.last_cur().idx, self.txt.len_chars());
+            let len = deleted.as_ref().map(|s| s.chars().count()).unwrap_or(1);
+            let ch_old_end = min(dot.first_cur().idx + len, self.txt.len_chars());
             ts.edit(cur.idx, ch_old_end, cur.idx, &self.txt);
         }
 

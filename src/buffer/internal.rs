@@ -264,10 +264,8 @@ impl GapBuffer {
         let eob = self.len();
 
         match endings.last() {
-            Some(&idx) if idx != eob => {
-                endings.push(eob);
-            }
-            _ => (),
+            Some(&idx) if idx == eob => (),
+            _ => endings.push(eob),
         }
 
         endings

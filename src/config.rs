@@ -12,12 +12,17 @@ use serde::{de, Deserialize, Deserializer};
 use std::{collections::HashMap, env, fs, io, path::Path};
 use tracing::{error, warn};
 
+pub const DEFAULT_CONFIG: &str = include_str!("../data/config.toml");
+
 pub const TK_DEFAULT: &str = "default";
 pub const TK_DOT: &str = "dot";
 pub const TK_LOAD: &str = "load";
 pub const TK_EXEC: &str = "exec";
 
-const DEFAULT_CONFIG: &str = include_str!("../data/config.toml");
+pub(crate) fn config_path() -> String {
+    let home = env::var("HOME").unwrap();
+    format!("{home}/.ad/config.toml")
+}
 
 /// Editor level configuration
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -51,7 +56,7 @@ impl Config {
     /// Attempt to load a config file from the default location
     pub fn try_load() -> Result<Self, String> {
         let home = env::var("HOME").unwrap();
-        let path = format!("{home}/.ad/config.toml");
+        let path = config_path();
 
         let mut cfg = match fs::read_to_string(&path) {
             Ok(s) => match toml::from_str(&s) {

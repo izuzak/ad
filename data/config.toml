@@ -1,31 +1,69 @@
 # Config file for the ad text editor
 # For details of the TOML file format see https://toml.io/en/v1.0.0
 
+# Whether or not the 9p filesystem interface should attempt to automount via fuse on startup
 auto_mount = false
+# Whether or not tab characters should be automatically replaced with `tabstop` spaces
 expand_tab = true
+# The number of spaces to render tab characters with
 tabstop = 4
+# Whether or not leading whitespace should be copied to new lines on pressing Return
 match_indent = true
+# Number of seconds to persist status messages for
 status_timeout = 3
+# Number of milliseconds allowed between left mouse clicks for registering a double click
 double_click_ms = 200
+# Maximum number of lines used when rendering the minibuffer state
 minibuffer_lines = 8
+# Shell command to be used for listing files when running the `find file` and `find repo file` commands
 find_command = "fd -t f"
 
+
+# Configuration for tree-sitter based syntax highlighting. See :help for details on the required
+# directory structure.
 [tree_sitter]
+# The directory to search for compiled *.so files for parsing each language.
 parser_dir = "~/.ad/tree-sitter/parsers"
+# The directory to search for syntax highlighting queries.
 syntax_query_dir = "~/.ad/tree-sitter/queries"
 
+
+# Global color scheme settings
 [colorscheme]
+# The default background color for all UI elements
 bg = "#1B1720"
+# The default foreground color for all UI elements
 fg = "#E6D29E"
+# The background color for the status bar
 bar_bg = "#4E415C"
+# The foreground color for the sign / number column
 signcol_fg = "#544863"
+# The background highlight color for the selected line in the mini-buffer
 minibuffer_hl = "#3E3549"
 
+# Syntax highlighting settings for tree-sitter query captures
+# Each key in this table should match a corresponding capture in one of your syntax highlighting
+# queries. For example, if you had the following in your $lang.scm file:
+#
+#  (line_comment) @comment
+#  (block_comment) @comment
+#
+# then the `comment` key in this table will define the styling for nodes matching line and block
+# comments.
+#
+# The supported styling properties are:
+#   - fg: string RRGGBB hex color code
+#   - bg: string RRGGBB hex color code
+#   - bold: boolean
+#   - italic: boolean
+#   - underline: boolean
 [colorscheme.syntax]
+# Required styling for default text and selections
 default = { fg = "#E6D29E", bg = "#1B1720" }
 dot = { fg = "#E6D29E", bg = "#336677" }
 load = { fg = "#E6D29E", bg = "#957FB8" }
 exec = { fg = "#E6D29E", bg = "#Bf616A" }
+# Styling for tree-sitter query captures
 boolean = { fg = "#DCA561", bold = true }
 character = { fg = "#61DCA5", italic = true }
 comment = { fg = "#624354", italic = true }
@@ -40,7 +78,7 @@ type = { fg = "#7E9CD8" }
 variable = { fg = "#E6C384" }
 
 
-# Key mappings to programs that must be available on $PATH.
+# Key mappings to programs that must be available on $PATH or commands.
 # ~/.ad/bin is auto-added to the path
 [keys.normal]
 "<space> F" = { run = "fmt" }

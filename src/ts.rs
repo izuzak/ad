@@ -79,10 +79,10 @@ impl TsState {
     pub fn edit(&mut self, ch_start: usize, ch_old_end: usize, ch_new_end: usize, gb: &GapBuffer) {
         let byte_and_point = |ch: usize| {
             let byte = gb.char_to_byte(ch);
-            let y = gb.char_to_line(ch);
-            let x = byte - gb.char_to_byte(gb.line_to_char(y));
+            let row = gb.char_to_line(ch);
+            let col = byte - gb.char_to_byte(gb.line_to_char(row));
 
-            (byte, ts::Point::new(x, y))
+            (byte, ts::Point::new(row, col))
         };
 
         let (start_byte, start_position) = byte_and_point(ch_start);
@@ -106,6 +106,12 @@ impl TsState {
 
         if let Some(tree) = new_tree {
             self.tree = tree;
+            self.t.stale = true;
+        }
+    }
+
+    pub fn update(&mut self, gb: &GapBuffer) {
+        if self.t.stale {
             self.t.update(self.tree.root_node(), gb);
         }
     }
@@ -211,6 +217,7 @@ impl Parser {
             q,
             cur,
             ranges: Vec::new(),
+            stale: true,
         })
     }
 }
@@ -219,6 +226,7 @@ pub struct Tokenizer {
     q: ts::Query,
     cur: ts::QueryCursor,
     ranges: Vec<SyntaxRange>,
+    stale: bool,
 }
 
 impl fmt::Debug for Tokenizer {
@@ -262,6 +270,7 @@ impl Tokenizer {
 
         self.ranges.sort_unstable();
         self.ranges.dedup();
+        self.stale = false;
     }
 
     #[inline]
@@ -876,6 +885,12 @@ impl<'a> Iterator for TokenIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        buffer::Buffer,
+        dot::{Cur, Dot},
+        editor::Action,
+    };
+    use ad_event::Source;
     use simple_test_case::test_case;
 
     fn sr(from: usize, to: usize) -> SyntaxRange {
@@ -1083,5 +1098,51 @@ mod tests {
         let held = it.update_held(initial, r);
 
         assert_eq!(held, expected);
+    }
+
+    #[test]
+    #[ignore = "this test requires installed parsers and queries"]
+    fn char_delete_correctly_update_state() {
+        let s = "fn main() {}";
+        let mut b = Buffer::new_unnamed(0, s);
+        b.ts_state = Some(
+            TsState::try_new(
+                "rust",
+                "/home/sminez/.local/share/nvim/lazy/nvim-treesitter/parser",
+                "data/tree-sitter/queries",
+                &b.txt,
+            )
+            .unwrap(),
+        );
+
+        let ranges = b.ts_state.as_ref().unwrap().t.ranges.clone();
+        let sr = |idx, from, to| SyntaxRange {
+            cap_idx: Some(idx),
+            r: ByteRange { from, to },
+        };
+
+        assert_eq!(b.str_contents(), "fn main() {}\n");
+        assert_eq!(
+            ranges,
+            vec![
+                sr(5, 0, 2),    // fn
+                sr(14, 7, 8),   // (
+                sr(14, 8, 9),   // )
+                sr(14, 10, 11), // {
+                sr(14, 11, 12), // }
+            ]
+        );
+
+        b.dot = Dot::Cur { c: Cur { idx: 9 } };
+        b.handle_action(Action::Delete, Source::Fsys);
+        b.ts_state.as_mut().unwrap().update(&b.txt);
+        let ranges = b.ts_state.as_ref().unwrap().t.ranges.clone();
+
+        assert_eq!(b.str_contents(), "fn main(){}\n");
+        assert_eq!(ranges.len(), 5);
+
+        // these two should have moved left one character
+        assert_eq!(ranges[3], sr(14, 9, 10), "opening curly");
+        assert_eq!(ranges[4], sr(14, 10, 11), "closing curly");
     }
 }

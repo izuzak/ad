@@ -25,6 +25,7 @@ the line is highlighted, hit enter to jump to that section of the file. (See the
 >> Index
 About
 The Tour
+Configuration
 Editor Modes
 Loading Text
 Executing Text
@@ -33,6 +34,7 @@ Running External Commands
 Running Edit Commands
 The Filesystem Interface
 LSP support
+Syntax Highlighting
 
 ---
 
@@ -86,6 +88,15 @@ Once ad is open the "intro" file will instruct you on how to start the tour. Mid
 (or pressing the "@" key) on the PrevSlide and NextSlide "buttons" on each slide will
 navigate through the tour. Refer to the "Executing Text" section of this help file to learn
 more about how that works.
+
+---
+
+>> Configuration
+
+Your config file is located at {{CONFIG_PATH}}
+
+You can right click on this path to open your current config file. The default configuration
+will be written to that file on startup if it is currently missing.
 
 ---
 
@@ -274,7 +285,59 @@ ad has minimal support for the Language Server Protocol for the pieces of functi
 within the feature set of the editor itself. See the "Running Built In Commands" section for
 details of which features are supported.
 
-Configuration of LSP servers is currently not supported and only built in support for Rust and
-Dart is in place. Configuration via a TOML file is coming soon.
+Configuration of LSP servers is currently supported through the '[[languages]]' section of your
+config.toml configuration file. There you may specify the command to run to start the language
+server along with any arguments that need to be passed and a list of files that should be searched
+for in parent directories in order to determine the root of the project.
+
+Example config.toml section:
+  [[languages]]
+  name = "rust"
+  extensions = ["rs"]
+  lsp.command = "rust-analyzer"
+  lsp.args = []
+  lsp.roots = ["Cargo.toml"]
+
+
+---
+
+>> Syntax Highlighting
+
+ad supports syntax highlighting via tree-sitter. In order to enable syntax highlighting for a given
+file type you will need to ensure that you have:
+
+  - a compiled '$lang.so' file in your configured 'parser_dir' directory
+  - a 'highlights.scm' file for that file type in your configured 'syntax_query_dir' directory.
+  - a '[[languages]]' entry for the language in your 'config.toml'
+
+
+Example config.toml sections:
+  [tree_sitter]
+  parser_dir = "~/.ad/tree-sitter/parsers"
+  syntax_query_dir = "~/.ad/tree-sitter/queries"
+
+  [[languages]]
+  name = "rust"
+  extensions = ["rs"]
+  first_lines = []
+
+
+Example directory structure and contents:
+
+  ~/.ad/tree-sitter
+    ├── parsers
+    │    └── rust.so
+    └── queries
+        └── rust
+           └── highlights.scm
+
+
+For additional information on how to write tree-sitter queries see the official documentation here:
+  https://tree-sitter.github.io/tree-sitter/syntax-highlighting#queries
+
+For a quick way of re-using parsers and queries from neovim, see the following from the nvim-treesitter
+project:
+  https://github.com/nvim-treesitter/nvim-treesitter/blob/master/lua/nvim-treesitter/parsers.lua
+  https://github.com/nvim-treesitter/nvim-treesitter/tree/master/queries
 
 ---
