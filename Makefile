@@ -49,7 +49,7 @@ ensure-mountpoint:
 
 .PHONY: backup-current-config
 backup-current-config: ensure-mountpoint
-	[ -f $$HOME/.ad/init.conf ] && mv $$HOME/.ad/init.conf $$HOME/.ad/init.conf.bck || true
+	[ -f $$HOME/.ad/config.toml ] && mv $$HOME/.ad/config.toml $$HOME/.ad/config.toml.bck || true
 
 .PHONY: backup-current-plumbing
 backup-current-plumbing: ensure-mountpoint
@@ -57,7 +57,7 @@ backup-current-plumbing: ensure-mountpoint
 
 .PHONY: copy-default-config
 copy-default-config: ensure-mountpoint backup-current-config
-	cp data/init.conf $$HOME/.ad
+	cp data/config.toml $$HOME/.ad
 
 .PHONY: copy-default-plumbing
 copy-default-plumbing: ensure-mountpoint backup-current-plumbing
@@ -65,7 +65,7 @@ copy-default-plumbing: ensure-mountpoint backup-current-plumbing
 
 .PHONY: copy-rust-config
 copy-rust-config: ensure-mountpoint backup-current-config
-	cp data/init-rust.conf $$HOME/.ad/init.conf
+	cp data/init-rust.conf $$HOME/.ad/config.toml
 
 .PHONY: copy-bin
 copy-bin: ensure-mountpoint

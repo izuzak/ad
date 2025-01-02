@@ -25,7 +25,7 @@ pwd                   -- print the current editor working directory
 q | quit              -- quit ad as long as there are no buffers with pending changes
 q! | quit!            -- quit ad discarding all pending changes for open buffers
 reload-buffer | Get   -- refresh the current buffer's content from the state of the file on disk
-reload-config         -- reload the editor config file located at ~/.ad/init.conf
+reload-config         -- reload the editor config file located at ~/.ad/config.toml
 set                   -- set a config property ('set bg-color=#ebdbb2')
 view-logs             -- open ad's internal logs in a new buffer
 viewport-bottom       -- place the current line at the bottom of the window

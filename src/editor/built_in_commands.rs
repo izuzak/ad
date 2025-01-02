@@ -94,7 +94,7 @@ pub fn built_in_commands() -> Vec<(Vec<&'static str>, &'static str)> {
         ),
         (
             vec!["reload-config"],
-            "reload the editor config file located at ~/.ad/init.conf",
+            "reload the editor config file located at ~/.ad/config.toml",
         ),
         (
             vec!["set"],
