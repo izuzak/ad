@@ -269,8 +269,8 @@ If you have the 9p(1) command line utility installed you can use it to explore t
   9p ls ad/buffers/1
   9p read ad/buffers/1/dot
 
-If you have the fusermount(1) and 9pfuse(4) programs installed then you can set the "auto-mount"
-property in ~/.ad/init.conf to true and mount the filesystem directly at ~/.ad/mnt when ad starts.
+If you have the fusermount(1) and 9pfuse(4) programs installed then you can set the "auto_mount"
+property in ~/.ad/config.toml to true and mount the filesystem directly at ~/.ad/mnt when ad starts.
 The default scripts provided in the ad GitHub repo serve as a useful reference for the sorts of
 interactions that are possible through this interface:
 

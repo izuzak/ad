@@ -11,4 +11,4 @@ interacting with ad from other programs:
         9p read ad/buffers/1/dot
 
     - if you have the fusermount(1) and 9pfuse(4) programs installed then you can set the
-      "auto-mount" property in ../../data/init.conf to true and mount the filesystem directly
+      "auto-mount" property in ../../data/config.toml to true and mount the filesystem directly
