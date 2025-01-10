@@ -682,7 +682,14 @@ fn render_slice(
         };
 
         if *cols + w <= max_cols {
-            buf.push(ch);
+            if ch == '\t' {
+                // Tab is just a control character that moves the cursor rather than
+                // replacing the previous buffer content so we need to explicitly
+                // insert spaces instead.
+                buf.extend(std::iter::repeat_n(' ', tabstop));
+            } else {
+                buf.push(ch);
+            }
             *cols += w;
         } else {
             break;
