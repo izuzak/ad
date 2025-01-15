@@ -820,11 +820,7 @@ where
                 match outcome {
                     ReadOutcome::Immediate(data) => data,
                     ReadOutcome::Blocked(chan) => {
-                        // Cloning the stream can
-                        let mut stream = match self.stream.try_clone() {
-                            Ok(stream) => stream,
-                            Err(err) => return Err(err),
-                        };
+                        let mut stream = self.stream.try_clone()?;
 
                         spawn(move || {
                             let data = chan.recv().unwrap_or_default();

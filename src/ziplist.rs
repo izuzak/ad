@@ -115,11 +115,7 @@ impl<T> ZipList<T> {
         I: IntoIterator<Item = T>,
     {
         let mut it = iter.into_iter();
-
-        let focus = match it.next() {
-            Some(t) => t,
-            None => return None,
-        };
+        let focus = it.next()?;
 
         Some(Self {
             up: VecDeque::default(),

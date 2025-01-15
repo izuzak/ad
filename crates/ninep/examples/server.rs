@@ -166,7 +166,7 @@ impl Serve9p for EchoServer {
             RW => Ok(Stat {
                 fm: FileMeta::file("rw", BAZ),
                 perms: Perm::OWNER_READ | Perm::OWNER_WRITE,
-                n_bytes: self.rw.as_bytes().len() as u64,
+                n_bytes: self.rw.len() as u64,
                 last_accesses: SystemTime::now(),
                 last_modified: SystemTime::now(),
                 owner: uname.into(),
@@ -269,7 +269,7 @@ impl Serve9p for EchoServer {
                 Stat {
                     fm: FileMeta::file("rw", RW),
                     perms: Perm::OWNER_READ | Perm::OWNER_WRITE,
-                    n_bytes: self.rw.as_bytes().len() as u64,
+                    n_bytes: self.rw.len() as u64,
                     last_accesses: SystemTime::now(),
                     last_modified: SystemTime::now(),
                     owner: uname.into(),

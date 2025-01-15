@@ -366,7 +366,7 @@ impl BufferNode {
         trace!(id=%self.id, %fname, "refreshing file stat");
         let content = self.current_file_content_as_string(fname, tx)?;
         let stat = self.file_stats.get_mut(fname)?;
-        stat.n_bytes = content.as_bytes().len() as u64;
+        stat.n_bytes = content.len() as u64;
 
         Some(stat.clone())
     }
