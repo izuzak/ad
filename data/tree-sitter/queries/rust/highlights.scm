@@ -1,9 +1,31 @@
+(function_item (identifier) @function)
+(function_signature_item (identifier) @function)
 (macro_invocation
   macro: (identifier) @function.macro
   "!" @function.macro)
 
+(identifier) @variable
+
+(const_item
+  name: (identifier) @constant)
+(type_identifier) @type
+(primitive_type) @type.builtin
+(field_identifier) @variable.member
+(shorthand_field_identifier) @variable.member
+(shorthand_field_initializer
+  (identifier) @variable.member)
+(mod_item
+  name: (identifier) @module)
+(self) @keyword.builtin
+
+"_" @character.special
+
 (line_comment) @comment
 (block_comment) @comment
+
+(boolean_literal) @boolean
+(integer_literal) @number
+(float_literal) @number.float
 
 (char_literal) @character
 
