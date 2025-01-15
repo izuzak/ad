@@ -726,6 +726,7 @@ fn render_line(
     }
 
     if cols < max_cols {
+        buf.push_str(&Style::Bg(cs.bg).to_string());
         buf.extend(std::iter::repeat_n(' ', max_cols - cols));
     }
 
