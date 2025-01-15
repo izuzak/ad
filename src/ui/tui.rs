@@ -22,7 +22,7 @@ use crate::{
 use std::{
     char,
     cmp::{min, Ordering},
-    io::{stdin, stdout, Read, Stdin, Stdout, Write},
+    io::{stdin, stdout, Read, Stdout, Write},
     panic,
     sync::mpsc::Sender,
     thread::{spawn, JoinHandle},
@@ -748,16 +748,30 @@ fn spawn_input_thread(tx: Sender<Event>) -> JoinHandle<()> {
     })
 }
 
-fn try_read_char(stdin: &mut Stdin) -> Option<char> {
-    let mut buf: [u8; 1] = [0; 1];
-    if stdin.read_exact(&mut buf).is_ok() {
-        Some(buf[0] as char)
-    } else {
-        None
+fn try_read_char(stdin: &mut impl Read) -> Option<char> {
+    let mut buf: [u8; 4] = [0; 4];
+
+    for i in 0..4 {
+        if stdin.read_exact(&mut buf[i..i + 1]).is_err() {
+            return if i == 0 {
+                None
+            } else {
+                Some(char::REPLACEMENT_CHARACTER)
+            };
+        }
+
+        match std::str::from_utf8(&buf[0..i + 1]) {
+            Ok(s) => return s.chars().next(),
+            Err(e) if e.error_len().is_some() => return Some(char::REPLACEMENT_CHARACTER),
+            Err(_) => (),
+        }
     }
+
+    // utf8 requires at most 4 bytes so at this point we have invalid data
+    Some(char::REPLACEMENT_CHARACTER)
 }
 
-fn try_read_input(stdin: &mut Stdin) -> Option<Input> {
+fn try_read_input(stdin: &mut impl Read) -> Option<Input> {
     let c = try_read_char(stdin)?;
 
     // Normal key press
@@ -810,4 +824,27 @@ fn try_read_input(stdin: &mut Stdin) -> Option<Input> {
     }
 
     Some(Input::Esc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use simple_test_case::test_case;
+    use std::{char::REPLACEMENT_CHARACTER, io};
+
+    #[test_case("a".as_bytes(), &['a']; "single ascii character")]
+    #[test_case(&[240, 159, 146, 150], &['💖']; "single utf8 character")]
+    #[test_case(&[165, 159, 146, 150], &[REPLACEMENT_CHARACTER; 4]; "invalid utf8 with non-ascii prefix")]
+    #[test_case(&[65, 159, 146, 150], &['A', REPLACEMENT_CHARACTER, REPLACEMENT_CHARACTER, REPLACEMENT_CHARACTER]; "invalid utf8 with ascii prefix")]
+    #[test]
+    fn try_read_char_works(bytes: &[u8], expected: &[char]) {
+        let mut r = io::Cursor::new(bytes);
+        let mut chars = Vec::new();
+
+        while let Some(ch) = try_read_char(&mut r) {
+            chars.push(ch);
+        }
+
+        assert_eq!(&chars, expected);
+    }
 }
