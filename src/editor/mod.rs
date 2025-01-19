@@ -1,6 +1,6 @@
 //! The main control flow and functionality of the `ad` editor.
 use crate::{
-    buffer::{ActionOutcome, Buffer},
+    buffer::{ActionOutcome, Buffer, BufferKind},
     config::Config,
     die,
     dot::TextObject,
@@ -20,7 +20,7 @@ use crate::{
 use ad_event::Source;
 use std::{
     env, panic,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         mpsc::{channel, Receiver, Sender},
         Arc,
@@ -281,6 +281,46 @@ where
             ReadBufferXAddr { id } => self.send_buffer_resp(id, tx, |b| b.xaddr()),
             ReadBufferXDot { id } => self.send_buffer_resp(id, tx, |b| b.xdot_contents()),
             ReadBufferBody { id } => self.send_buffer_resp(id, tx, |b| b.str_contents()),
+
+            SetBufferName { id, s } => {
+              let target_buffer = match self.layout.buffer_with_id_mut(id) {
+                  Some(b) => b,
+                  None => {
+                      _ = tx.send(Err("unknown buffer".to_string()));
+                      return;
+                  }
+              };
+
+              let new_path = Path::new(s.trim());
+              let path = match new_path.canonicalize() {
+
+                  Ok(p) => p,
+                  Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                      _ = tx.send(Err(format!("file not found")));
+                      return;
+                  },
+                  Err(e) => {
+                      _ = tx.send(Err(format!("filename error: {}", e.to_string())));
+                      return;
+                  },
+              };
+
+              let new_kind = match (&target_buffer.kind, path.is_dir()) {
+                (BufferKind::Directory(_), true) => {
+                  BufferKind::Directory(path)
+                }
+                (BufferKind::File(_), false) => {
+                  BufferKind::File(path)
+                },
+                _ => {
+                  _ = tx.send(Err("Incompatible buffer kind and file type".to_string()));
+                  return;
+                }
+              };
+
+               target_buffer.kind = new_kind;
+              _ = tx.send(Ok("handled".to_string()))
+            }
 
             SetBufferAddr { id, s } => self.handle_buffer_mutation(id, tx, s, |b, s| {
                 if let Ok(mut expr) = Addr::parse(&mut s.trim_end().chars().peekable()) {

@@ -44,6 +44,10 @@ pub enum Req {
     ReadBufferName {
         id: usize,
     },
+    SetBufferName {
+        id: usize,
+        s: String,
+    },
     ReadBufferDot {
         id: usize,
     },
